@@ -1,9 +1,11 @@
 import http from "http";
 import fs from "fs";
 import path from "path";
-import chalk from "../../compiler/chalk.js";
-import compile from "../../compiler/index.js";
-import { loadConfig, resolvePaths } from "../../compiler/config.js";
+
+// Chocola imports
+import chalk from "chocola/compiler/chalk.js";
+import compile from "chocola/compiler/index.js";
+import { loadConfig, resolvePaths } from "chocola/compiler/config.js";
 import { getConfig, isMissingConfigFile, queueConfigWarning } from "../utils.js";
 
 const warnedDevHostname = new Set();

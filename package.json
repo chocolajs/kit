@@ -4,6 +4,9 @@
   "description": "Web development, light and sweet",
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.js\""
+  },
   "bin": {
     "chocola": "./bin/chocola.js",
     "chjs": "./bin/chocola.js"
@@ -21,6 +24,6 @@
     "utils.js"
   ],
   "dependencies": {
-    "chocola": "2.0.0-next.12"
+    "chocola": "file:../chocola/chocola-2.0.0-next.12.tgz"
   }
 }

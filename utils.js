@@ -1,7 +1,9 @@
 import { promises as fs } from "fs";
 import path from "path";
-import chalk from "../compiler/chalk.js";
-import { throwError } from "../compiler/utils.js";
+
+// Chocola imports
+import chalk from "chocola/compiler/chalk.js";
+import { throwError } from "chocola/compiler/utils.js";
 
 const warnedMissing = new Set();
 const warnedBlockBundle = new Set();
