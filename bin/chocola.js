@@ -3,9 +3,12 @@ import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createRequire } from "module";
 import { readFile } from "fs/promises";
+
 import { getConfig, isMissingConfigFile } from "../utils.js";
-import { loadConfig } from "../../compiler/config.js";
-import chalk from "../../compiler/chalk.js";
+
+// Chocola imports
+import { loadConfig } from "chocola/compiler/config.js";
+import chalk from "chocola/compiler/chalk.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -140,7 +143,7 @@ export async function main() {
     return;
   }
   if (cmd === "version") {
-    const pkg = await readFile(path.join(__dirname, "../../package.json"), "utf-8");
+    const pkg = await readFile(path.join(__dirname, "..", "package.json"), "utf-8");
     console.log(JSON.parse(pkg).version);
     return;
   }
@@ -181,7 +184,7 @@ export async function main() {
     switch (cmd) {
       case "build": {
         const local = await getLocalModules(rootDir);
-        const compile = local ? local.mod.default : (await import("../../compiler/index.js")).default;
+        const compile = local ? local.mod.default : (await import("chocola/compiler/index.js")).default;
         await compile(rootDir, { overrides: base });
         process.exit(0);
       }
