@@ -98,10 +98,10 @@ async function banner() {
   if (!isPlain) {
     console.log("\n    ┌─────────────────────────────────────────────┐");
     console.log("    │┌-------------------------------------------┐│");
-    console.log("    ││                                          ││");
+    console.log("    ││                                           ││");
     console.log("    ││            {  C H O C O L A  }            ││");
-    console.log("    ││          THE SWEETEST WAY TO BUILD THE WEB ││");
-    console.log("    ││                                          ││");
+    console.log("    ││     THE SWEETEST WAY TO BUILD THE WEB     ││");
+    console.log("    ││                                           ││");
     console.log("    │└-------------------------------------------┘│");
     console.log("    └─────────────────────────────────────────────┘");
   }
