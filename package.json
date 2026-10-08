@@ -15,13 +15,15 @@
     "./dev": "./dev/index.js",
     "./server": "./server/index.js",
     "./utils": "./utils.js",
+    "./routing": "./routing.js",
     "./bin/*": "./bin/*"
   },
   "files": [
     "dev/",
     "server/",
     "bin/",
-    "utils.js"
+    "utils.js",
+    "routing.js"
   ],
   "dependencies": {
     "chocola": "^2.0.0-next.12"
