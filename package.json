@@ -24,6 +24,6 @@
     "utils.js"
   ],
   "dependencies": {
-    "chocola": "file:../chocola/chocola-2.0.0-next.12.tgz"
+    "chocola": "^2.0.0-next.12"
   }
 }
