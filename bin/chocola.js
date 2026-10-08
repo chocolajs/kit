@@ -183,9 +183,8 @@ export async function main() {
 
     switch (cmd) {
       case "build": {
-        const local = await getLocalModules(rootDir);
-        const compile = local ? local.mod.default : (await import("chocola/compiler/index.js")).default;
-        await compile(rootDir, { overrides: base });
+        const routingMod = await import("../routing.js");
+        await routingMod.default(rootDir, { overrides: base });
         process.exit(0);
       }
       case "dev": {

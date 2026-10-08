@@ -4,15 +4,15 @@ import path from "path";
 
 // Chocola imports
 import chalk from "chocola/compiler/chalk.js";
-import compile from "chocola/compiler/index.js";
 import { loadConfig, resolvePaths } from "chocola/compiler/config.js";
 import { getConfig, isMissingConfigFile, queueConfigWarning } from "../utils.js";
+import { buildMultipageGraph, emitMultipage } from "../routing.js";
 
 const warnedDevHostname = new Set();
 const warnedDevPort = new Set();
 
 export async function serve(__rootdir, { silent = false, port: cliPort, hostname: cliHostname, open } = {}) {
-  let __outdir = "dist";
+  let __outdir;
   let __config = {
     hostname: "localhost",
     port: 3000,
@@ -23,6 +23,7 @@ export async function serve(__rootdir, { silent = false, port: cliPort, hostname
   const fullConfig = await getConfig(__rootdir, { silent });
   const config = await loadConfig(__rootdir, { silent });
   const paths = resolvePaths(__rootdir, config);
+  __outdir = paths.outDir;
 
   if (cliPort) {
     __config.port = cliPort;
@@ -54,7 +55,12 @@ export async function serve(__rootdir, { silent = false, port: cliPort, hostname
     }
   }
 
-  await compile(__rootdir);
+  async function buildAll() {
+    const graph = await buildMultipageGraph(__rootdir);
+    await emitMultipage(graph);
+  }
+
+  await buildAll();
 
   const srcDir = paths.src;
 
@@ -63,7 +69,7 @@ export async function serve(__rootdir, { silent = false, port: cliPort, hostname
     clearTimeout(compileTimeout);
     compileTimeout = setTimeout(async () => {
       try {
-        await compile(__rootdir, { isHotReload: true });
+        await buildAll();
         lastBuildTime = Date.now();
         console.log(chalk.green("✓"), "Hot reload: compiled successfully");
       } catch (error) {
@@ -86,10 +92,21 @@ export async function serve(__rootdir, { silent = false, port: cliPort, hostname
       return;
     }
 
-    let filePath = path.join(
-      __outdir,
-      req.url === "/" ? "index.html" : req.url
-    );
+    const reqPath = (req.url || "/").split("?")[0].split("#")[0];
+    let filePath;
+    if (reqPath === "/") {
+      filePath = path.join(__outdir, "index.html");
+    } else {
+      // Prevent directory traversal
+      const safe = path.normalize(decodeURIComponent(reqPath)).replace(/^(\.\.(\/|\\|$))+/g, "").replace(/^\/+/, "");
+      if (!safe || safe.endsWith("/")) {
+        filePath = path.join(__outdir, safe, "index.html");
+      } else if (path.extname(safe)) {
+        filePath = path.join(__outdir, safe);
+      } else {
+        filePath = path.join(__outdir, safe + ".html");
+      }
+    }
 
     const extname = String(path.extname(filePath)).toLowerCase();
     const mimeTypes = {

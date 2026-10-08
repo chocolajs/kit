@@ -7,9 +7,9 @@ import { pathToFileURL } from "url";
 
 // Chocola imports
 import chalk from "chocola/compiler/chalk.js";
-import { buildModuleGraph } from "chocola/compiler/module-graph.js";
-import { renderPage } from "chocola/compiler/render.js";
 import { loadConfig, resolvePaths } from "chocola/compiler/config.js";
+
+import { buildMultipageGraph, buildRouteTable, matchRoute, renderRoute } from "../routing.js";
 
 import { getConfig, isMissingConfigFile, queueConfigWarning, flushConfigWarnings } from "../utils.js";
 
@@ -106,16 +106,7 @@ async function loadMiddleware(rootDir, middlewarePath) {
   return [];
 }
 
-function buildRouteTable(graph) {
-  const table = new Map();
-  // Single page support: index.html
-  if (graph.page) {
-    table.set("/", graph.page);
-    table.set("/index.html", graph.page);
-    table.set("/index", graph.page);
-  }
-  return table;
-}
+
 
 function sendNotModified(res) {
   res.writeHead(304);
@@ -194,7 +185,7 @@ export async function createHandler(rootDirArg, optsArg) {
    const config = await loadConfig(rootDir, { silent });
    const paths = resolvePaths(rootDir, config);
 
-  const graph = await buildModuleGraph(rootDir);
+   const graph = await buildMultipageGraph(rootDir);
 
   const middlewarePath = opts.middleware ?? fullConfig.server?.middleware ?? null;
   const middlewares = await loadMiddleware(rootDir, middlewarePath);
@@ -218,10 +209,14 @@ export async function createHandler(rootDirArg, optsArg) {
     }
   }
 
-  // Prime virtual files with initial render (ensures assets exist even before first SSR)
+  // Prime virtual files with initial render of every route
+  // (ensures assets exist even before first SSR)
   try {
-    const initial = await renderPage(graph, {});
-    ingest(initial);
+    const routes = graph.pages ? [...graph.pages.keys()].sort() : ["/"];
+    for (const route of routes) {
+      const initial = await renderRoute(graph, route, {});
+      ingest(initial);
+    }
   } catch (e) {
     // If initial render fails, continue; per-request render will surface error
     console.warn("[chocola/server] initial render failed:", e?.message || e);
@@ -241,16 +236,10 @@ export async function createHandler(rootDirArg, optsArg) {
       const cookies = parseCookies(req.headers.cookie || "");
 
       // 1) SSR route?
-      // Try exact, then fallback with/without trailing slash
-      let page = routeTable.get(pathname);
-      if (!page && pathname.endsWith("/") && pathname.length > 1) {
-        page = routeTable.get(pathname.slice(0, -1));
-      }
-      if (!page && !pathname.endsWith("/")) {
-        page = routeTable.get(pathname + "/");
-      }
+      const matched = matchRoute(routeTable, pathname);
 
-      if (page) {
+      if (matched) {
+        const { page, route } = matched;
         // Build per-request ctx via middleware
         let ctx = { ...query };
         // Also merge opts.ctx if provided (for programmatic use)
@@ -271,6 +260,8 @@ export async function createHandler(rootDirArg, optsArg) {
                 headers: req.headers,
                 url,
                 pathname,
+                route,
+                page,
                 searchParams: url.searchParams,
               });
             }
@@ -293,7 +284,7 @@ export async function createHandler(rootDirArg, optsArg) {
 
         let result;
         try {
-          result = await renderPage(graph, ctx);
+          result = await renderRoute(graph, route, ctx);
         } catch (e) {
           if (!res.headersSent && !res.writableEnded) {
             res.writeHead(500, { "Content-Type": "text/plain" });
