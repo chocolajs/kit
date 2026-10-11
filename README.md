@@ -7,6 +7,8 @@ This package features a fully functional modern framework with SSG, SSR/CSR, dev
 ## Documentation
 
 - [Overview](https://github.com/chocolajs/kit/blob/main/documentation/01-introduction/01-overview.md)
+- [Getting started](https://github.com/chocolajs/kit/blob/main/documentation/01-introduction/02-getting-started.md)
+- [CLI](https://github.com/chocolajs/kit/blob/main/documentation/04-reference/03-cli.md)
 
 ## Contributing
 
