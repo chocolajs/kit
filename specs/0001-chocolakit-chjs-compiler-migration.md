@@ -1,6 +1,6 @@
 # ChocolaKit migration to the Chocola `.chjs` compiler API
 
-Status: Proposed
+Status: Proposed — implementation runbook for an AI coding agent in §13
 
 ## 1. Objective
 
@@ -8,9 +8,11 @@ Move ChocolaKit off the retired compiler pipeline (`buildMultipageGraph`, `getCo
 
 ```js
 import { buildModuleGraph, render, compile } from "chocola/compiler";
+import { deterministicHash } from "chocola/compiler/utils.js";
+import { compileExpr } from "chocola/parser/index.js";
 ```
 
-Kit uses `buildModuleGraph` + `render` because it needs to keep graphs alive and render per request. `compile` remains available for single-module smoke checks or small integrations, but it is not used for Kit's multipage rendering.
+Kit uses `buildModuleGraph` + `render` because it needs to keep graphs alive and render per request. `compile` remains available for single-module smoke checks or small integrations, but it is not used for Kit's multipage rendering. `deterministicHash` is **not** exported from `chocola/compiler`; it lives in `chocola/compiler/utils.js`, which is reachable through the package's `./compiler/*` export.
 
 After this migration:
 
@@ -511,7 +513,7 @@ Add to `routing.js`:
 
 | File | Change |
 |---|---|
-| `package.json` | Confirm the `chocola` dependency exposes `buildModuleGraph`, `render`, `compile`, `normalizeConfig`, and `deterministicHash`. Do **not** add a `chalk` dependency. Add `chalk.js` and `config.js` to `files` (and `exports` for `config.js` if created). |
+| `package.json` | Confirm the `chocola` dependency exposes `buildModuleGraph`, `render`, `compile`, and `normalizeConfig` from `chocola/compiler`, and `deterministicHash` from `chocola/compiler/utils.js`. Do **not** add a `chalk` dependency. Add `chalk.js` and `config.js` to `files` (and `exports` for `config.js` if created). |
 | `chalk.js` (new) | Copy `specs/assets/chalk.js` verbatim. This is the previously shipped `chocola/compiler/chalk.js` implementation. Update this module if additional color/style helpers are needed. |
 | `config.js` (new) | Kit config loader, defaults, path resolution, CLI override merging, `libDir` deprecation. |
 | `utils.js` | Keep raw config and warning helpers; drop core `loadConfig` assumptions; import `chalk` from `./chalk.js` instead of `chocola/compiler/chalk.js`. |
@@ -635,21 +637,369 @@ Global styles move into the required shell:
 <link rel="stylesheet" href="/styles.css">
 ```
 
-## 13. Phased implementation sequence
+## 13. Implementation runbook for an AI coding agent
 
-1. **Baseline**: run the current test suite against the installed `chocola` package and record failures caused by the new API.
-2. **Config layer**: add `config.js`, copy `specs/assets/chalk.js` to `chalk.js` and replace `chocola/compiler/chalk.js` imports, update `utils.js`, and move `bin/chocola.js` off core `loadConfig`.
-3. **Page preprocessing and site state**: implement `<chocolakit:*>` extraction, the `.chocola/graph` mirror, `routing.js` discovery, and `buildSiteState` with one graph per page.
-4. **Document shell**: implement required `app.html` loading/validation, in-page head interpolation, and document assembly.
-5. **Render route**: implement `renderRoute` producing `{ html, styles, runtime, hashMap, head }` with the shell.
-6. **Runtime serving**: implement chunk-origin mapping, non-`.chjs` import rewriting, and `RuntimeStore`.
-7. **Styles/output/hashes**: implement `sc-*`, runtime emission, static/source copying, and `.chocola/hashes.json`.
-8. **SSR server**: switch `createHandler`/`serve` to state-once/render-per-request and the runtime store.
-9. **Dev server**: switch to state-once/render-per-request, watcher rebuild, hot-reload injection, and runtime store.
-10. **CLI**: update `resolveConfig`, flags, help, and build invocation.
-11. **Fixtures and tests**: convert fixtures and rewrite tests; run `npm test` until green.
-12. **Docs**: update documentation and add the migration guide.
-13. **Final verification**: run `npm test`, `chocola build` on the fixture, and manual `dev`/`serve` smoke tests.
+This section is written for an AI coding agent. A human drives the work; the agent executes one step at a time and reports back. The rest of this document is the specification; this section is the operating procedure.
+
+### 13.1 Operating contract
+
+The human will instruct the agent with a message shaped like:
+
+> Implement step 3 of `specs/0001-chocolakit-chjs-compiler-migration.md`. Stop and report when done.
+
+Rules the agent must follow:
+
+1. **Read first.** Read `AGENTS.md`, `CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE.md`, this spec, and the files listed for the current step before editing anything.
+2. **One step at a time.** Do only the step the human names. Do not start later steps, and do not bundle unrelated cleanup into the same change.
+3. **Do not commit.** Never run `git commit`, `git push`, `gh pr create`, or equivalent unless the human explicitly asks in the same instruction.
+4. **Do not add dependencies.** In particular, do not add `chalk`. Copy `specs/assets/chalk.js` into `chalk.js` as specified. Do not change the `chocola` dependency.
+5. **Do not edit Chocola core.** `node_modules/chocola/**` and the Chocola source repository are out of scope. If the installed core API does not match §3, stop and report.
+6. **Respect user work.** Run `git status --short` before editing. If tracked files outside this migration's expected surface are modified, report and ask before touching them.
+7. **Stay inside the step's file list.** If the step truly requires another file, make the change and list it under "Deviations" in the report.
+8. **No silent design changes.** If the code reality contradicts this spec, stop and ask the human for an amendment. Spec changes are allowed; unplanned implementation deviations are not.
+9. **Tests are the contract.** Use the repo's documented command, `npm test` (do not use `pnpm`, `yarn`, or a different runner). Run targeted tests while iterating and the full suite before reporting a step complete.
+10. **Report honestly.** Include the exact commands run, their outcome, and any remaining failures. Do not claim a step is complete if its verification did not pass.
+11. **Keep style consistent.** Follow the existing module style and the `snake_case` internal / `camelCase` public convention from `CONTRIBUTING.md`.
+12. **Temporary files stay outside the repo.** Use the OS temp directory for scratch fixtures or logs. Do not add scratch files to the repository.
+
+### 13.2 Per-step protocol
+
+A **gate** is a hard stop. When a step says "Gate: report", finish the report, end your turn, and wait for the human. Do not continue into the next step just because the current one passed.
+
+Before editing:
+
+- State the current step, its goal, and the files you expect to touch.
+- Confirm required earlier steps are complete and their verification passed.
+
+While working:
+
+- Keep the diff scoped. Prefer small edits over rewrites.
+- If a test reveals a spec gap, stop and report it instead of inventing behavior.
+
+Before reporting:
+
+- Run the step's verification commands.
+- Run `git status --short` and `git diff --stat` to confirm the change surface.
+- Use this report format:
+
+```text
+Step N — <name>
+Status: done | blocked
+Files changed: <paths>
+Commands run: <command → pass/fail, with failure excerpts if any>
+Verification: <which checks passed>
+Deviations: <none | description + reason>
+Next: Step N+1 — <name>
+```
+
+If blocked, replace "Next" with the exact question for the human and the options considered.
+
+### 13.3 Steps
+
+Steps are ordered. Each step assumes the previous ones are complete unless stated otherwise.
+
+#### Step 0 — Preflight and baseline (read-only)
+
+Goal: establish a trustworthy baseline and confirm the core API.
+
+Files: none. Do not edit.
+
+Actions:
+
+1. Read the files listed in rule 1 of §13.1.
+2. Run `git status --short`. Report any modified or untracked paths. The pre-existing `package.json` change that points `chocola` at the local `chocola-2.0.0-next.13.tgz` is expected; do not revert it.
+3. Confirm the installed core exports the API in §3:
+   ```sh
+   node -e "import('chocola/compiler').then(m => console.log(Object.keys(m).sort().join('\n')))"
+   node -e "import('chocola/compiler/utils.js').then(m => console.log(Object.keys(m).sort().join('\n')))"
+   ```
+   The first output must include `buildModuleGraph`, `render`, `compile`, and `normalizeConfig`. The second must include `deterministicHash`. If `deterministicHash` is missing from the index but present in `utils.js`, that is expected; do not import it from the index.
+4. Run `npm test` and capture the full output. Classify each failure as:
+   - `old-api`: caused by `buildMultipageGraph`/`getComponents`/`renderPage`/`emitMultipage` or removed core modules;
+   - `expected-red`: assertions this migration will rewrite;
+   - `unrelated`/`environment`.
+5. Do not fix anything in this step.
+
+Verify: the export check passes and the baseline is recorded.
+
+Gate: report and wait. The human must confirm the baseline and the §16 decisions. If the human says "use the recommended options", record that and continue.
+
+#### Step 1 — Local chalk and Kit config layer
+
+Goal: remove the last core-module dependencies and make Kit own configuration.
+
+Files: `chalk.js` (new), `config.js` (new), `utils.js`, `bin/chocola.js`, `package.json`.
+
+Actions:
+
+1. Copy `specs/assets/chalk.js` to `chalk.js` byte-for-byte. Do not modify the copy unless a later step needs a helper, and list any change as a deviation.
+2. Do not add `chalk` to `dependencies` or `devDependencies`.
+3. Implement `config.js` exactly as §4.1:
+   - `DEFAULT_CONFIG`;
+   - `loadConfig(rootDir, { silent, customPath, overrides })` returning `{ config, paths, raw }`;
+   - `resolvePaths(rootDir, config)`;
+   - `normalizeConfig` passthrough for core;
+   - `bundle`/`build` handling, `libDir` deprecation warning, and CLI override merging.
+4. Update `utils.js` to import from `./chalk.js` and to stop assuming core `loadConfig`.
+5. Update `bin/chocola.js` for §4.2: keep existing flags, add `--pagesDir`, `--appFile`, `--staticDir`, accept `--libDir` with a deprecation warning, keep `--config`, and route config resolution through Kit.
+6. In `package.json`, add `chalk.js` and `config.js` to `files`; add `./config` to `exports`. Do not change the dependency version.
+
+Verify:
+
+```sh
+node --check chalk.js
+node --check config.js
+node --check utils.js
+node --check bin/chocola.js
+```
+
+Also smoke-load the loader against a temporary config in the OS temp directory and confirm defaults, overrides, and `libDir` behavior. Do not add the temp fixture to the repo.
+
+Note: `bin/chocola.js` may still fail at runtime because `routing.js` has not been migrated yet. That is expected at this step; only syntax and config-loader behavior are gated.
+
+Gate: report. The human may review the `config.js` surface before routing depends on it.
+
+#### Step 2 — Page preprocessing, graph mirror, discovery, and site state
+
+Goal: replace `buildMultipageGraph` with Kit-owned discovery and `buildSiteState`, feeding core a clean mirror.
+
+Files: `routing.js`.
+
+Actions:
+
+1. Replace old core imports with `buildModuleGraph` and `render` from `chocola/compiler`, `deterministicHash` from `chocola/compiler/utils.js`, and `compileExpr` from `chocola/parser/index.js`. Remove `buildMultipageGraph`, `getComponents`, `renderPage`, and `emitMultipage` imports.
+2. Delete the old multipage/layout machinery: `toComponentSFC`, `injectPageIntoLayout`, `pageComponentName`, `pageComponentTag`, sidecar head splitting, and implicit `src/lib` discovery.
+3. Implement route/output helpers from §5.2, including `filePathToRoute`, `routeAliases`, `srcRelToOutputRel`, `normalizePathname`, `matchRoute`, and `buildRouteTable` over `.chjs`.
+4. Implement `extractPageDirectives(source, filePath)`:
+   - require exactly one `<template>`;
+   - find a top-level `<chocolakit:head>...</chocolakit:head>`;
+   - reject nested/multiple head blocks or a head block inside `<template>`;
+   - validate head children against the allowed tags in §6.2;
+   - reject any other `<chocolakit:*>` tag and any `<app>`;
+   - return `{ source: cleanedSource, headSource }`.
+5. Implement graph-mirror materialization per §5.3:
+   - recreate `<rootDir>/.chocola/graph/`;
+   - copy every `.chjs` file from `srcDir`, skipping `staticDir`, dot-directories, and `node_modules`;
+   - write cleaned page sources for page entries;
+   - leave non-page modules unchanged after validating they contain no `<chocolakit:*>` tags.
+6. Implement `buildSiteState(rootDir, { overrides, config })` returning the shape in §5.3, build one graph per page via `buildModuleGraph(graphRoot, { entry, config: coreConfig })`, and populate `page.chunkOrigins`.
+7. Implement the discovery errors from §5.1: missing pages, duplicate routes, `.html` pages, legacy `src/index.html`, missing `<template>`, and unknown directives. Use `[chocola/routing]` prefixes and include the offending path. The missing `app.html` error is added with shell loading in Step 3.
+
+Verify:
+
+```sh
+node --check routing.js
+```
+
+Then run a scratch script in the OS temp directory that imports `routing.js`, builds state for a temporary site with `src/app.html`, `src/pages/index.chjs`, `src/pages/about.chjs`, and `src/lib/card.chjs`, and asserts:
+
+- routes `/` and `/about` exist;
+- `[...page.graph.modules.keys()]` contains `pages/index.chjs`, `pages/about.chjs`, and `lib/card.chjs`;
+- the mirror file for `pages/index.chjs` no longer contains `<chocolakit:head>`;
+- `page.headSource` contains the extracted head.
+
+Gate: report. Do not proceed to shell work if module ids or the mirror layout differ from §3/§5.3.
+
+#### Step 3 — Required shell, head interpolation, and document assembly
+
+Goal: assemble complete documents from the required `app.html`.
+
+Files: `routing.js`.
+
+Actions:
+
+1. Add shell loading and validation to `buildSiteState`, per §6.1:
+   - default `src/app.html`;
+   - throw `[chocola/routing]` with the expected path when missing;
+   - require exactly one `<chocolakit:body>`;
+   - allow at most one `<chocolakit:head>` inside `<head>`;
+   - reject `<app>`;
+   - require `</head>` and `</body>`.
+2. Implement head interpolation from §6.2 using `compileExpr` against `ctx` merged with `page.graph.root.compProps` defaults.
+3. Implement `assembleDocument({ state, page, ctx, result, runtime })` with the exact order in §6.3. Insert the core fragment verbatim at `<chocolakit:body>` and never wrap it in `<app>`.
+4. When the shell has no head slot, append page head content before `</head>` and emit the warning once per build.
+
+Verify: extend the Step 2 scratch script:
+
+- a page with `<chocolakit:head><title>{title}</title></chocolakit:head>` renders the interpolated title with `ctx` and with the root prop default;
+- a page without a head leaves the shell head unchanged;
+- a missing shell throws with the path;
+- two body slots, two head slots, `<app>`, and a missing `</body>` each throw.
+
+Gate: report.
+
+#### Step 4 — Shared render pipeline, runtime rewriting, and `RuntimeStore`
+
+Goal: render a page into a complete response and serve valid ESM chunks.
+
+Files: `routing.js` (and `utils.js` only if shared helpers are needed).
+
+Actions:
+
+1. Implement `renderRoute(state, routeOrPathname, ctx)` per §9.1. Return `{ page, route, html, styles, runtime, hashMap, head }` with runtime imports already rewritten.
+2. Build the chunk-origin map from `page.chunkOrigins` per §7.3 and rewrite only relative non-`.chjs` specifiers to `/<src-relative>` URLs. Leave `./run-*.js` and absolute paths untouched; warn once per build for bare specifiers and for relative paths that escape `srcDir`.
+3. Implement `RuntimeStore` per §7.4 with `add`, `get`, `writeTo`, `clear`, memory caching, disk fallback under `<rootDir>/.chocola/runtime/`, and startup clearing.
+4. Implement `emitSite(state, { ctx, ctxPerRoute })` per §9.1 and the default `compileMultipage` export. Write scoped CSS, runtime chunks, static assets, source assets, and `hashes.json` exactly as §8.
+5. Keep runtime chunk names intact. Do not rename, bundle, or inline them.
+
+Verify: extend the scratch script to:
+
+- render `/` and assert the assembled HTML has no `<chocolakit:body>` slot left, contains the page fragment, includes the scoped `<link>` when styles exist, and includes one `<script type="module" src="/run-*.js">` per runtime entry;
+- assert a rewritten `./format.js` becomes `/lib/format.js`;
+- assert hydration output is stable for the same ctx and differs for different ctx;
+- run `emitSite` into a temp `outDir` and assert `index.html`, `sc-*.css`, `run-*.js`, `styles.css`, source assets, static assets, and `.chocola/hashes.json` exist.
+
+Gate: report before touching the servers. The human may inspect the emitted temp output.
+
+#### Step 5 — SSR server
+
+Goal: serve the new pipeline with state built once and `render` per request.
+
+Files: `server/index.js`.
+
+Actions:
+
+1. Replace core config imports with Kit `loadConfig`/`resolvePaths`.
+2. Build `buildSiteState`, the route table, and the `RuntimeStore` once at handler creation.
+3. Warm every route with empty ctx to populate invariant chunks, scoped CSS, and `hashMap`.
+4. For each request, follow §9.2: match, run middleware, merge query/ctx, `renderRoute`, ingest assets, serve assembled HTML with ETag/gzip.
+5. Serve runtime CSS/JS first, then `/<src-relative>` source assets, then static files, then 404.
+6. Expose `handler.graphs`, `handler.routes`, `handler.hashMap`, `handler.virtualFiles`, `handler.paths`, and `handler.state`.
+7. Import `chalk` from `../chalk.js`. Keep `createServer` and `createServerRenderer` aliases.
+
+Verify: the existing server tests will still be red until Step 8 rewrites them. Instead, run a scratch server against the Step 2/3 temp site on an ephemeral port and assert:
+
+- `/` returns the assembled document;
+- `/run-*.js` returns `text/javascript` with a module body;
+- rewritten `/lib/format.js` returns the source file;
+- `/styles.css`, `/static/hello.txt`, and `/favicon.ico` resolve;
+- a second request reuses the same graph objects and produces a new `render` result.
+
+Gate: report.
+
+#### Step 6 — Dev server
+
+Goal: same pipeline as SSR, with full rebuilds and hot reload.
+
+Files: `dev/index.js`.
+
+Actions:
+
+1. Replace `loadConfig`, `resolvePaths`, `buildMultipageGraph`, and `emitMultipage` with Kit config/state.
+2. Build state once at startup.
+3. Watch `srcDir` recursively; on change, debounce, rebuild state and the graph mirror, clear runtime/scoped caches, and update `lastBuildTime`.
+4. Render per request through the shared pipeline. Do not serve prebuilt HTML from `outDir`.
+5. Serve runtime assets from the store and source/static files from disk.
+6. Keep `/api/hot-reload` and inject the hot-reload script after runtime tags in assembled HTML.
+7. Import `chalk` from `../chalk.js`.
+
+Verify: start dev against the temp site on an ephemeral port and assert the document, runtime chunks, source assets, and hot-reload script; edit a page in the temp site and assert the next request reflects the change.
+
+Gate: report.
+
+#### Step 7 — CLI wiring
+
+Goal: make the CLI drive the new pipeline end to end.
+
+Files: `bin/chocola.js`.
+
+Actions:
+
+1. Complete `resolveConfig` using Kit `loadConfig` with `customPath` and CLI overrides.
+2. Wire `build` to `compileMultipage`/`emitSite`.
+3. Wire `dev` and `serve` to the updated modules with the resolved config.
+4. Update `--help` for `--pagesDir`, `--appFile`, `--staticDir`, and the `libDir` deprecation.
+5. Keep the `chocola` and `chjs` binaries and the existing exit-code behavior.
+
+Verify:
+
+```sh
+node --check bin/chocola.js
+```
+
+From a temp fixture copy, invoke the CLI in the repository (for example
+`node <repo>/bin/chocola.js build`) and assert it emits `dist/index.html` and
+the runtime/scoped assets. Do not run `dev`/`serve` here; Step 10 covers them.
+
+Gate: report.
+
+#### Step 8 — Fixtures and tests
+
+Goal: migrate fixtures and turn the suite green against the new API.
+
+Files: `tests/fixtures/basic/**`, `tests/fixtures/server/**`, `tests/compiler.test.js`, `tests/routing.test.js`, `tests/server.test.js`, `tests/config.test.js`, `tests/cli.test.js`.
+
+Actions:
+
+1. Migrate `tests/fixtures/basic` to the shape in §11.1. Add the required `src/app.html`, in-page `<chocolakit:head>`, explicit `.chjs` imports, and remove `src/index.html`, `<app>`, `.html` components, sidecar heads, and `globalStyles`.
+2. Update `tests/fixtures/server` to reuse the migrated fixture with server config.
+3. Rewrite the test files to cover every item in §11.2. Keep existing coverage that still applies.
+4. For tests that must prove graphs are built once, instrument `buildModuleGraph`/`render` or assert state object identity; do not weaken the assertion to "it works".
+5. Remove or replace assertions for removed APIs instead of skipping them. Do not add `test.skip` for the new behavior.
+6. Use no new test dependencies.
+
+Verify:
+
+```sh
+npm test
+```
+
+Fix failures inside the migration surface. If a failure is outside it (for example a core bug), stop and report with a minimal reproduction.
+
+Gate: report with the full pass/fail summary. The human may ask for targeted test runs before accepting.
+
+#### Step 9 — Documentation
+
+Goal: make the human-facing documentation match the new behavior.
+
+Files: `documentation/**`, `documentation/04-reference/04-migration.md` (new), `README.md`, `ROADMAP.md`, `.gitignore`.
+
+Actions:
+
+1. Update docs per §12: `.chjs`, explicit imports, required shell, in-page head, `pages/index.chjs` entry, author-managed global styles, runtime URLs, hash keys, `libDir` deprecation.
+2. Add the migration guide with the before/after examples in §12.
+3. Ignore `.chocola/` (graph mirror and runtime store) and fixture-generated `dist/`/`.chocola/` in `.gitignore`.
+4. Update the PR description/breaking-change notes only if the human asks; do not open a PR.
+
+Verify: search the docs for stale terms and confirm each remaining hit is intentional:
+
+```sh
+git grep -n "\.html\|<app>\|<chocolakit:head>\|globalStyles\|libDir\|run-" -- documentation README.md ROADMAP.md
+```
+
+Gate: report.
+
+#### Step 10 — Final verification
+
+Goal: prove the migration works end to end.
+
+Files: none expected. Fixes must be reported and scoped.
+
+Actions:
+
+1. Run `npm test` and record the result.
+2. Package Kit and test the installed CLI against a temp fixture copy:
+   ```sh
+   npm pack
+   cd <temp-dir>/basic
+   npm install <repo>/<packed-tarball>.tgz
+   npx chocola build
+   ```
+   Then:
+   - inspect `dist/` against §8.5;
+   - run `npx chocola serve` and fetch `/`, a runtime chunk, the scoped CSS, `styles.css`, a source asset, and a static asset;
+   - run `npx chocola dev`, fetch `/`, edit a page, and confirm the next response updates.
+   Do not install the tarball into the repository working tree.
+3. Confirm `.chocola/hashes.json` exists after build/warm-up and uses module-id keys.
+4. Confirm no `chalk` dependency, no `css-*` output, no sidecar head files, and no core pipeline imports remain:
+   ```sh
+   git grep -n "buildMultipageGraph\|getComponents\|renderPage\|emitMultipage\|compiler/chalk\|compiler/pipeline"
+   ```
+5. Run `git status --short` and confirm only intended files changed.
+
+Verify: every item in §15 is checked, or the exceptions are listed explicitly.
+
+Gate: report the final summary and wait. Do not commit or open a PR unless the human explicitly instructs it in that turn.
 
 ## 14. Risks and mitigations
 
@@ -688,10 +1038,12 @@ Global styles move into the required shell:
 - [ ] `hashMap` is keyed by root-relative module ids, persisted to `.chocola/hashes.json`, and exposed by the server handler.
 - [ ] `src/static` and non-`.chjs` source assets are copied/served by Kit.
 - [ ] Templates, fixtures, docs, and examples use `.chjs` with explicit imports.
-- [ ] The Kit test suite passes against the new API with `pnpm test`.
+- [ ] The Kit test suite passes against the new API with `npm test`.
 - [ ] A manual `chocola build`, `chocola dev`, and `chocola serve` smoke test passes on the migrated fixture.
 
 ## 16. Open decisions to confirm before implementation
+
+The agent must not start Step 1 until the human confirms these. If the human accepts the recommendations, the agent records that in the Step 0 report and proceeds.
 
 1. Serve runtime chunks individually (recommended) versus bundling them into one file.
 2. Persist per-request hydration chunks under `.chocola/runtime/` (recommended) versus inlining the hydration chunk in the document.
