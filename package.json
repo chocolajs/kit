@@ -16,12 +16,15 @@
     "./server": "./server/index.js",
     "./utils": "./utils.js",
     "./routing": "./routing.js",
+    "./config": "./config.js",
     "./bin/*": "./bin/*"
   },
   "files": [
     "dev/",
     "server/",
     "bin/",
+    "chalk.js",
+    "config.js",
     "utils.js",
     "routing.js"
   ],
