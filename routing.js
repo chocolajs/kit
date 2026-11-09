@@ -2,32 +2,19 @@ import { promises as fs } from "fs";
 import path from "path";
 
 // Chocola imports
-import { loadConfig, resolvePaths } from "chocola/compiler/config.js";
-import { getComponents } from "chocola/compiler/pipeline.js";
-import { renderPage } from "chocola/compiler/render.js";
-import { ChocolaModule } from "chocola/compiler/module-graph.js";
-import { compileExpr, extractPropsDefaults } from "chocola/parser/index.js";
+import { buildModuleGraph } from "chocola/compiler/index.js";
+import { deterministicHash } from "chocola/compiler/utils.js";
+
+import { loadConfig, resolvePaths } from "./config.js";
 
 /**
- * Layout routing conventions (SvelteKit-style):
- * - `src/app.html` is the general layout (full HTML document). It must contain
- *   exactly one `<chocolakit:body>` tag where the page renders and at most one
- *   `<chocolakit:head>` tag inside `<head>` where the page's head fragment
- *   renders (e.g. per-page `<title>`/`<meta>`). `<app>` is not used in the
- *   layout.
- * - `src/pages/` holds pages as extended components (same SFC format as
- *   `lib/` components: optional `<script>` props, `<template>` content,
- *   `<style>` scoped CSS, including `$runtime`). A plain HTML fragment also
- *   works and is treated as the template. Pages may contain one top-level
- *   `<chocolakit:head>` tag with head-only elements (`<title>`, `<meta>`,
- *   `<link>`); it is moved into the layout head at render time. All remaining
- *   page content renders at `<chocolakit:body>`.
- * - `src/pages/index.html` renders `/`, `src/pages/about.html` renders
- *   `/about`, `src/pages/blog/post.html` renders `/blog/post`.
- *
- * Legacy mode (no `src/app.html` and no `src/pages/`): every `.html` file
- * directly under `src/` (excluding `lib/` and `static/`) is a standalone
- * full-document page, as before.
+ * Routing conventions:
+ * - `src/pages/**\/*.chjs` are page entries. `pages/index.chjs` renders `/`.
+ * - `src/app.html` is the required document shell (loaded in a later step).
+ * - Pages may contain one top-level `<chocolakit:head>` block with head-only
+ *   elements. Kit extracts it before core sees the source.
+ * - Core only receives `.chjs` files, so Kit mirrors `src/` under
+ *   `.chocola/graph/` and removes page directives from that mirror.
  */
 
 export const PAGES_DIR = "pages";
@@ -35,40 +22,99 @@ export const APP_FILE = "app.html";
 export const BODY_SLOT_TAG = "chocolakit:body";
 export const HEAD_SLOT_TAG = "chocolakit:head";
 
-function slotPattern(tag) {
-  return new RegExp(`<${tag}(\\s[^<>]*)?\\s*(\\/>|>([\\s\\S]*?)<\\/${tag}\\s*>)`, "gi");
+const CHJS_EXTENSION = ".chjs";
+const HTML_EXTENSION = ".html";
+
+const HEAD_ALLOWED_TAGS = new Set([
+  "title",
+  "meta",
+  "link",
+  "base",
+  "style",
+  "noscript",
+]);
+
+const VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+function toPosix(value) {
+  return value.split(path.sep).join("/");
 }
 
-function slotRegex() {
-  return slotPattern(BODY_SLOT_TAG);
+function stripLeadingSlashes(value) {
+  return value.replace(/^\/+/, "");
 }
 
-function headSlotRegex() {
-  return slotPattern(HEAD_SLOT_TAG);
+function isInside(abs, base) {
+  if (!base) return false;
+  const a = path.resolve(abs);
+  const b = path.resolve(base);
+  return a === b || a.startsWith(b + path.sep);
+}
+
+function joinPosix(...parts) {
+  return path.posix.join(
+    ...parts.flatMap((part) => String(part).split("\\").join("/").split("/").filter(Boolean))
+  );
+}
+
+async function pathExists(p) {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Convert a pages-relative posix path (e.g. "about.html", "blog/index.html")
+ * Convert a pages-relative posix path (e.g. "about.chjs", "blog/index.chjs")
  * into a route (e.g. "/about", "/blog", "/").
  */
 export function filePathToRoute(pagesRelPosix) {
-  const normalized = pagesRelPosix.split("\\").join("/").replace(/^\/+/, "");
-  const noExt = normalized.replace(/\.html$/i, "");
+  const normalized = stripLeadingSlashes(
+    String(pagesRelPosix).split("\\").join("/")
+  );
+  const noExt = normalized.replace(/\.chjs$/i, "");
   if (noExt === "index") return "/";
   if (noExt.endsWith("/index")) {
-    const base = noExt.slice(0, -"/index".length);
-    return "/" + base;
+    return "/" + noExt.slice(0, -"/index".length);
   }
   return "/" + noExt;
 }
 
 /**
  * Output relative path (inside outDir) for a page.
- * In layout mode this is pages-relative; in legacy mode it is src-relative.
- * e.g. "about.html" -> "about.html", "blog/index.html" -> "blog/index.html"
+ * Accepts either a pages-relative path or a src-relative one, strips the
+ * pages directory when present, and maps `.chjs` to `.html`.
  */
-export function srcRelToOutputRel(relPosix) {
-  return relPosix.split("\\").join("/").replace(/^\/+/, "");
+export function srcRelToOutputRel(relPosix, pagesDir = PAGES_DIR) {
+  let rel = String(relPosix).split("\\").join("/");
+  let prefix = String(pagesDir).split("\\").join("/");
+  rel = stripLeadingSlashes(rel).replace(/\/+$/, "");
+  prefix = stripLeadingSlashes(prefix).replace(/\/+$/, "");
+
+  if (prefix && rel === prefix) {
+    rel = "";
+  } else if (prefix && rel.startsWith(prefix + "/")) {
+    rel = rel.slice(prefix.length + 1);
+  }
+
+  return stripLeadingSlashes(rel).replace(/\.chjs$/i, ".html");
 }
 
 /**
@@ -77,7 +123,7 @@ export function srcRelToOutputRel(relPosix) {
  */
 export function routeAliases(route, outRelPosix) {
   const aliases = new Set();
-  const outRel = outRelPosix.split("\\").join("/");
+  const outRel = String(outRelPosix).split("\\").join("/");
   aliases.add(route);
   if (route !== "/") {
     aliases.add(route + "/");
@@ -96,227 +142,313 @@ export function routeAliases(route, outRelPosix) {
   return [...aliases];
 }
 
-/**
- * Deterministic synthetic component name for a route, e.g.
- * "/" -> "chocolakitpageindex.html", "/blog/post" -> "chocolakitpageblogpost.html".
- * Alphanumeric-only so generated CSR class names stay valid identifiers.
- */
-export function pageComponentName(route) {
-  const slug = route === "/" ? "index" : route.slice(1).toLowerCase().replace(/[^a-z0-9]/g, "");
-  return `chocolakitpage${slug || "index"}.html`;
-}
-
-export function pageComponentTag(compName) {
-  const base = compName.replace(/\.html$/i, "");
-  return base.charAt(0).toUpperCase() + base.slice(1);
+function isCommentStart(source, index) {
+  return source.startsWith("<!--", index);
 }
 
 /**
- * Normalize a page source into component SFC shape ({script,template,style}
- * parseable by chocola's component pipeline). Sources that already contain a
- * <template> are returned as-is; anything else is treated as the template,
- * preserving any top-level <script>/<style> blocks.
+ * Read a tag starting at `index` (which must point at `<`).
+ * Returns { type, rawName, lowerName, selfClosing, start, end }.
  */
-export function toComponentSFC(source) {
-  if (/<template(?=[\s>])/i.test(source)) return source;
-  const scripts = [...source.matchAll(/<script(?=[\s>])[^>]*>[\s\S]*?<\/script\s*>/gi)]
-    .map((m) => m[0])
-    .join("\n");
-  const styles = [...source.matchAll(/<style(?=[\s>])[^>]*>[\s\S]*?<\/style\s*>/gi)]
-    .map((m) => m[0])
-    .join("\n");
-  let rest = source
-    .replace(/<script(?=[\s>])[^>]*>[\s\S]*?<\/script\s*>/gi, "")
-    .replace(/<style(?=[\s>])[^>]*>[\s\S]*?<\/style\s*>/gi, "");
-  const body = rest.match(/<body[^>]*>([\s\S]*?)<\/body\s*>/i);
-  if (body) {
-    rest = body[1];
-  } else {
-    const html = rest.match(/<html[^>]*>([\s\S]*?)<\/html\s*>/i);
-    if (html) rest = html[1];
+function readTag(source, index) {
+  if (isCommentStart(source, index)) {
+    const close = source.indexOf("-->", index + 4);
+    return {
+      type: "comment",
+      rawName: "",
+      lowerName: "",
+      selfClosing: true,
+      start: index,
+      end: close === -1 ? source.length : close + 3,
+    };
   }
-  rest = rest
-    .replace(/<!doctype[^>]*>/gi, "")
-    .replace(/<\/?(html|head|body)[^>]*>/gi, "");
-  return `${scripts}\n<template>${rest}</template>\n${styles}`;
-}
 
-function validateLayout(layoutSource, layoutFile) {
-  const matches = [...layoutSource.matchAll(slotRegex())];
-  if (matches.length === 0) {
-    throw new Error(
-      `[chocola/routing] ${layoutFile} must contain exactly one <${BODY_SLOT_TAG}> tag (found none). Pages render where the slot is.`
-    );
+  const next = source[index + 1];
+  if (!next || !/[a-zA-Z/!?]/.test(next)) {
+    return {
+      type: "text",
+      rawName: "",
+      lowerName: "",
+      selfClosing: true,
+      start: index,
+      end: index + 1,
+    };
   }
-  if (matches.length > 1) {
-    throw new Error(
-      `[chocola/routing] ${layoutFile} must contain exactly one <${BODY_SLOT_TAG}> tag (found ${matches.length}).`
-    );
-  }
-  if (/<app(?=[\s>])/i.test(layoutSource)) {
-    throw new Error(
-      `[chocola/routing] ${layoutFile} must not contain <app>: <app> was replaced by <${BODY_SLOT_TAG}>.`
-    );
-  }
-  const headSlots = [...layoutSource.matchAll(headSlotRegex())];
-  if (headSlots.length > 1) {
-    throw new Error(
-      `[chocola/routing] ${layoutFile} must contain at most one <${HEAD_SLOT_TAG}> tag (found ${headSlots.length}).`
-    );
-  }
-}
 
-/**
- * Inject the page component tag into the layout at the body slot.
- * Slot attributes are forwarded onto the page tag (they become page props).
- */
-export function injectPageIntoLayout(layoutSource, tag) {
-  return layoutSource.replace(slotRegex(), (_, attrs) => `<app><${tag}${attrs || ""}></${tag}></app>`);
-}
-
-const HEAD_ALLOWED_TAGS = new Set(["title", "meta", "link", "base", "style", "noscript"]);
-
-/**
- * Extract the page's head fragment (top-level `<chocolakit:head>` content)
- * and the remaining body SFC. Returns { head, sfc }.
- */
-export function splitPageHead(source) {
-  const sfc = /<template(?=[\s>])/i.test(source) ? source : toComponentSFC(source);
-  const matches = [...sfc.matchAll(headSlotRegex())];
-  if (matches.length > 1) {
-    throw new Error(
-      `[chocola/routing] Pages must contain at most one top-level <${HEAD_SLOT_TAG}> tag (found ${matches.length}).`
-    );
+  let cursor = index + 1;
+  let type = "start";
+  if (source[cursor] === "/") {
+    type = "end";
+    cursor++;
   }
-  // Nested-slot check: the head tag must sit at depth 0 of the page template
-  // (script/style sources may legitimately contain such strings, so only
-  // template markup is scanned).
-  const withoutStyles = sfc.replace(/<style(?=[\s>])[^>]*>[\s\S]*?<\/style\s*>/gi, "");
-  const templateBody =
-    withoutStyles.match(/<template(?=[\s>])[^>]*>([\s\S]*?)<\/template\s*>/i)?.[1] ?? withoutStyles;
-  const VOID_ELEMENTS = new Set([
-    "area", "base", "br", "col", "embed", "hr", "img", "input",
-    "link", "meta", "param", "source", "track", "wbr",
-  ]);
-  const depthAt = (prefix) => {
-    let depth = 0;
-    const tagRe = /<!--[\s\S]*?-->|<\/?([a-zA-Z][a-zA-Z0-9-]*)[^<>]*>/g;
-    let tagMatch;
-    while ((tagMatch = tagRe.exec(prefix)) !== null) {
-      const full = tagMatch[0];
-      if (full.startsWith("<!--")) continue;
-      if (full[1] === "/") {
-        depth = Math.max(0, depth - 1);
-        continue;
-      }
-      if (full.endsWith("/>") || VOID_ELEMENTS.has(tagMatch[1].toLowerCase())) continue;
-      depth++;
+
+  const nameStart = cursor;
+  while (cursor < source.length && /[a-zA-Z0-9:._-]/.test(source[cursor])) {
+    cursor++;
+  }
+  const rawName = source.slice(nameStart, cursor);
+
+  let quote = null;
+  for (; cursor < source.length; cursor++) {
+    const char = source[cursor];
+    if (quote) {
+      if (char === quote) quote = null;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === ">") {
+      cursor++;
+      break;
     }
-    return depth;
+  }
+
+  const raw = source.slice(index, cursor);
+  return {
+    type: rawName ? type : "other",
+    rawName,
+    lowerName: rawName.toLowerCase(),
+    selfClosing: /\/\s*>$/.test(raw),
+    start: index,
+    end: cursor,
   };
-  for (const match of matches) {
-    const idx = templateBody.indexOf(match[0]);
-    if (idx !== -1 && depthAt(templateBody.slice(0, idx)) > 0) {
+}
+
+function findBlockClose(source, from, lowerName) {
+  let cursor = from;
+  while (cursor < source.length) {
+    const index = source.indexOf("<", cursor);
+    if (index === -1) return null;
+    const tag = readTag(source, index);
+    if (tag.type === "end" && tag.lowerName === lowerName) {
+      return { contentEnd: index, end: tag.end };
+    }
+    cursor = tag.end;
+  }
+  return null;
+}
+
+function scanTags(source, { skipBlocks = new Set() } = {}) {
+  const tags = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    const index = source.indexOf("<", cursor);
+    if (index === -1) break;
+    const tag = readTag(source, index);
+    if (tag.type === "comment" || tag.type === "text" || tag.type === "other") {
+      cursor = tag.end;
+      continue;
+    }
+    tags.push(tag);
+    if (
+      tag.type === "start" &&
+      !tag.selfClosing &&
+      skipBlocks.has(tag.lowerName)
+    ) {
+      const close = findBlockClose(source, tag.end, tag.lowerName);
+      cursor = close ? close.end : tag.end;
+      continue;
+    }
+    cursor = tag.end;
+  }
+  return tags;
+}
+
+function validateHeadFragment(headSource, filePath) {
+  for (const tag of scanTags(headSource, {
+    skipBlocks: new Set(["style", "noscript"]),
+  })) {
+    if (tag.type !== "start") continue;
+    if (!HEAD_ALLOWED_TAGS.has(tag.lowerName)) {
       throw new Error(
-        `[chocola/routing] <${HEAD_SLOT_TAG}> must be a top-level page tag (found nested inside another element).`
+        `[chocola/routing] ${filePath}: <${HEAD_SLOT_TAG}> only supports ${[
+          ...HEAD_ALLOWED_TAGS,
+        ]
+          .map((tagName) => `<${tagName}>`)
+          .join(", ")} (found <${tag.rawName}>).`
       );
     }
   }
-  if (!matches.length) return { head: null, sfc };
-  const head = matches[0][3] ?? "";
-  const rest = sfc.replace(headSlotRegex(), "");
-  for (const tagMatch of head.matchAll(/<([a-zA-Z][a-zA-Z0-9-]*)[^>]*>/g)) {
-    const tag = tagMatch[1].toLowerCase();
-    if (!HEAD_ALLOWED_TAGS.has(tag)) {
+}
+
+function rejectKitDirectives(source, filePath) {
+  for (const tag of scanTags(source, {
+    skipBlocks: new Set(["script", "style", "noscript"]),
+  })) {
+    if (!tag.lowerName.startsWith("chocolakit:")) continue;
+    throw new Error(
+      `[chocola/routing] ${filePath}: <${tag.rawName}> is only allowed in page entries.`
+    );
+  }
+}
+
+function rejectAppTag(source, filePath) {
+  for (const tag of scanTags(source, {
+    skipBlocks: new Set(["script", "style", "noscript"]),
+  })) {
+    if (tag.type === "start" && tag.lowerName === "app") {
       throw new Error(
-        `[chocola/routing] <${HEAD_SLOT_TAG}> only supports ${[...HEAD_ALLOWED_TAGS].map((t) => `<${t}>`).join(", ")} (found <${tagMatch[1]}>).`
+        `[chocola/routing] ${filePath}: <app> is no longer supported. Pages render directly into <${BODY_SLOT_TAG}> in ${APP_FILE}.`
       );
     }
   }
-  return { head, sfc: rest };
 }
 
 /**
- * Build the per-request page ctx: component prop defaults, `<script>`
- * top-level values that the matcher can resolve statically, then global ctx.
- * Values unrelated to the head are harmless because renderPage re-merges
- * the same keys. Attribute interpolation inside the page head uses the
- * same `{expr}` syntax as components.
+ * Extract a page's top-level `<chocolakit:head>` block and return the cleaned
+ * page source that core is allowed to see.
+ *
+ * @param {string} source
+ * @param {string} filePath
+ * @returns {{ source: string, headSource: string|null }}
  */
-function resolvePageCtx(pageSource, ctx) {
-  const merged = { ...(ctx || {}) };
-  const scriptMatch = pageSource.match(/<script(?=[\s>])[^>]*>([\s\S]*?)<\/script\s*>/i);
-  const script = scriptMatch ? scriptMatch[1] : "";
-  const proxy = new Proxy(merged, { has() { return true; }, get(t, k) { return t[k]; } });
-  for (const { name, defaultValue } of extractPropsDefaults(script)) {
-    if (defaultValue !== undefined && !(name in merged)) {
-      try {
-        merged[name] = compileExpr(defaultValue, false)();
-      } catch {
-        merged[name] = defaultValue;
+export function extractPageDirectives(source, filePath) {
+  const label = filePath || "<page>";
+  let cursor = 0;
+  let templateDepth = 0;
+  let templateCount = 0;
+  let templateUnclosed = false;
+  let elementDepth = 0;
+  let head = null;
+  let headOpen = false;
+
+  while (cursor < source.length) {
+    const index = source.indexOf("<", cursor);
+    if (index === -1) break;
+    const tag = readTag(source, index);
+
+    if (tag.type === "comment" || tag.type === "text" || tag.type === "other") {
+      cursor = tag.end;
+      continue;
+    }
+
+    if (
+      tag.type === "start" &&
+      (tag.lowerName === "script" || tag.lowerName === "style")
+    ) {
+      const close = findBlockClose(source, tag.end, tag.lowerName);
+      cursor = close ? close.end : tag.end;
+      continue;
+    }
+
+    if (tag.type === "start" && tag.lowerName === "template") {
+      if (templateDepth === 0) templateCount++;
+      if (tag.selfClosing) {
+        if (templateDepth === 0) templateUnclosed = false;
+      } else {
+        templateDepth++;
+        templateUnclosed = true;
+      }
+      cursor = tag.end;
+      continue;
+    }
+
+    if (tag.type === "end" && tag.lowerName === "template") {
+      if (templateDepth > 0) {
+        templateDepth--;
+        if (templateDepth === 0) templateUnclosed = false;
+      }
+      cursor = tag.end;
+      continue;
+    }
+
+    if (tag.type === "start" && tag.lowerName === "app") {
+      rejectAppTag(source, label);
+    }
+
+    if (tag.lowerName.startsWith("chocolakit:")) {
+      if (tag.lowerName !== HEAD_SLOT_TAG) {
+        throw new Error(
+          `[chocola/routing] ${label}: <${tag.rawName}> is not a supported page directive. Only <${HEAD_SLOT_TAG}> is allowed.`
+        );
+      }
+
+      if (tag.type === "start") {
+        if (templateDepth > 0) {
+          throw new Error(
+            `[chocola/routing] ${label}: <${HEAD_SLOT_TAG}> must be a top-level page tag, not nested inside <template>.`
+          );
+        }
+        if (elementDepth > 0) {
+          throw new Error(
+            `[chocola/routing] ${label}: <${HEAD_SLOT_TAG}> must be a top-level page tag, not nested inside another element.`
+          );
+        }
+        if (headOpen || head) {
+          throw new Error(
+            `[chocola/routing] ${label}: pages may contain at most one top-level <${HEAD_SLOT_TAG}> block.`
+          );
+        }
+        headOpen = !tag.selfClosing;
+        head = {
+          start: index,
+          contentStart: tag.end,
+          contentEnd: tag.selfClosing ? tag.end : null,
+          end: tag.selfClosing ? tag.end : null,
+        };
+      } else if (tag.type === "end") {
+        if (!headOpen || !head) {
+          throw new Error(
+            `[chocola/routing] ${label}: unexpected </${HEAD_SLOT_TAG}> without a matching opening tag.`
+          );
+        }
+        headOpen = false;
+        head.contentEnd = index;
+        head.end = tag.end;
+      }
+      cursor = tag.end;
+      continue;
+    }
+
+    if (templateDepth === 0) {
+      if (tag.type === "start") {
+        if (!tag.selfClosing && !VOID_ELEMENTS.has(tag.lowerName)) {
+          elementDepth++;
+        }
+      } else if (tag.type === "end" && elementDepth > 0) {
+        elementDepth--;
       }
     }
+
+    cursor = tag.end;
   }
-  return { merged, proxy };
-}
 
-function interpolateHead(head, pageSource, ctx) {
-  if (!head) return "";
-  const { merged, proxy } = resolvePageCtx(pageSource, ctx);
-  return head.replace(/\{([^}]+)\}/g, (_, expr) => {
-    try {
-      const value = compileExpr(expr.trim(), true)(proxy);
-      return value == null ? "" : String(value);
-    } catch {
-      return "";
-    }
-  }).trim();
-}
-
-/**
- * Render the page head fragment into the layout head at the head slot.
- * Pages without a head fragment leave the layout head untouched.
- */
-export function injectHeadIntoLayout(layoutSource, pageSource, ctx = {}) {
-  const { head } = splitPageHead(pageSource);
-  const fragment = interpolateHead(head, pageSource, ctx);
-  if (!headSlotRegex().test(layoutSource)) {
-    if (head) {
-      console.warn(
-        `[chocola/routing] Page defines <${HEAD_SLOT_TAG}> but the layout has no <${HEAD_SLOT_TAG}> slot: head content ignored.`
-      );
-    }
-    return layoutSource;
+  if (templateCount === 0) {
+    throw new Error(
+      `[chocola/routing] ${label}: page entries must contain exactly one <template> section.`
+    );
   }
-  return layoutSource.replace(headSlotRegex(), () => fragment);
-}
-
-function isExcludedDir(name) {
-  return name.startsWith(".") || name === "node_modules";
-}
-
-function isExcludedPageFile(basename) {
-  if (basename.startsWith(".") || basename.startsWith("_")) return true;
-  return false;
-}
-
-async function pathExists(p) {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
+  if (templateCount > 1) {
+    throw new Error(
+      `[chocola/routing] ${label}: page entries must contain exactly one <template> section (found ${templateCount}).`
+    );
   }
-}
+  if (templateUnclosed) {
+    throw new Error(`[chocola/routing] ${label}: unclosed <template> section.`);
+  }
+  if (headOpen || (head && head.end === null)) {
+    throw new Error(
+      `[chocola/routing] ${label}: unclosed <${HEAD_SLOT_TAG}> block.`
+    );
+  }
 
-async function walkHtmlFiles(dir, { libAbs, staticAbs } = {}) {
-  const out = [];
-  const isInside = (abs, excl) => {
-    if (!excl) return false;
-    const a = path.resolve(abs);
-    const e = path.resolve(excl);
-    return a === e || a.startsWith(e + path.sep);
+  if (!head) {
+    return { source, headSource: null };
+  }
+
+  const headSource = source.slice(head.contentStart, head.contentEnd);
+  validateHeadFragment(headSource, label);
+
+  return {
+    source: source.slice(0, head.start) + source.slice(head.end),
+    headSource,
   };
+}
+
+async function walkFiles(
+  dir,
+  { skipAbs = null, includeUnderscored = true, includeHiddenFiles = true } = {}
+) {
+  const files = [];
+
   async function walk(current) {
     let entries;
     try {
@@ -324,235 +456,260 @@ async function walkHtmlFiles(dir, { libAbs, staticAbs } = {}) {
     } catch {
       return;
     }
+
+    entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const abs = path.join(current, entry.name);
+      if (isInside(abs, skipAbs)) continue;
+
       if (entry.isDirectory()) {
-        if (isExcludedDir(entry.name)) continue;
-        if (entry.name.startsWith("_")) continue;
-        // Skip lib dir and static dir wherever they appear under src
-        if (isInside(abs, libAbs)) continue;
-        if (isInside(abs, staticAbs)) continue;
+        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        if (!includeUnderscored && entry.name.startsWith("_")) continue;
         await walk(abs);
       } else if (entry.isFile()) {
-        if (!entry.name.toLowerCase().endsWith(".html")) continue;
-        if (isExcludedPageFile(entry.name)) continue;
-        if (isInside(abs, libAbs)) continue;
-        if (isInside(abs, staticAbs)) continue;
-        out.push(abs);
+        if (!includeUnderscored && entry.name.startsWith("_")) continue;
+        if (!includeHiddenFiles && entry.name.startsWith(".")) continue;
+        files.push(abs);
       }
     }
   }
+
   await walk(dir);
-  return out.sort();
+  return files.sort();
 }
 
-function sortByRoute(a, b) {
-  return a.route < b.route ? -1 : a.route > b.route ? 1 : 0;
-}
+async function discoverPageFiles(paths) {
+  const pagesDir = paths.pagesDir;
+  const chjs = [];
+  const html = [];
 
-/**
- * Discover pages under srcDir.
- * Returns { mode, pages, layoutFile } where mode is "layout" or "legacy"
- * and pages is [{ srcRel, outRel, filePath, route }] sorted by route.
- */
-export async function discoverPages(rootDir, { overrides } = {}) {
-  const config = overrides
-    ? await loadConfig(rootDir, { silent: true, overrides })
-    : await loadConfig(rootDir);
-  const paths = resolvePaths(rootDir, config);
-  return discoverPagesInSrc(paths.src, paths);
-}
-
-export async function discoverPagesInSrc(srcAbs, paths) {
-  const pagesAbs = path.join(srcAbs, PAGES_DIR);
-  const appAbs = path.join(srcAbs, APP_FILE);
-  const hasApp = await pathExists(appAbs);
-  const inPages = (await pathExists(pagesAbs)) ? await walkHtmlFiles(pagesAbs, {}) : [];
-
-  if (hasApp || inPages.length > 0) {
-    if (!hasApp) {
-      throw new Error(
-        `[chocola/routing] Layout mode detected (${PAGES_DIR}/ holds pages) but ${APP_FILE} is missing: create src/${APP_FILE} with exactly one <${BODY_SLOT_TAG}> tag.`
-      );
-    }
-    if (!inPages.length) {
-      throw new Error(
-        `[chocola/routing] No pages found in ${pagesAbs}. Add at least ${PAGES_DIR}/index.html (rendered as /).`
-      );
-    }
-    const pages = inPages.map((abs) => {
-      const pagesRel = path.relative(pagesAbs, abs).split(path.sep).join("/");
-      const srcRel = path.relative(srcAbs, abs).split(path.sep).join("/");
-      return { srcRel, outRel: pagesRel, filePath: abs, route: filePathToRoute(pagesRel) };
-    });
-    pages.sort(sortByRoute);
-    return { mode: "layout", pages, layoutFile: appAbs };
+  if (!(await pathExists(pagesDir))) {
+    return { chjs, html };
   }
 
-  // Legacy mode: standalone full-document pages directly under src/
-  const libAbs = paths?.components ? path.resolve(paths.components) : null;
-  const staticAbs = paths?.src ? path.join(path.resolve(paths.src), "static") : null;
-  if (!(await pathExists(srcAbs))) {
-    return { mode: "legacy", pages: [], layoutFile: null };
-  }
-  const files = await walkHtmlFiles(srcAbs, { libAbs, staticAbs });
-  const pages = files.map((abs) => {
-    const srcRel = path.relative(srcAbs, abs).split(path.sep).join("/");
-    return { srcRel, outRel: srcRel, filePath: abs, route: filePathToRoute(srcRel) };
+  const files = await walkFiles(pagesDir, {
+    includeUnderscored: false,
+    includeHiddenFiles: false,
   });
-  pages.sort(sortByRoute);
-  return { mode: "legacy", pages, layoutFile: null };
-}
-
-async function getFileMtime(filePath) {
-  try {
-    return (await fs.stat(filePath)).mtimeMs;
-  } catch {
-    return null;
+  for (const file of files) {
+    const name = file.toLowerCase();
+    if (name.endsWith(CHJS_EXTENSION)) chjs.push(file);
+    else if (name.endsWith(HTML_EXTENSION)) html.push(file);
   }
-}
-
-async function loadComponentsSafe(componentsAbs) {
-  try {
-    return await getComponents(componentsAbs);
-  } catch {
-    return { loadedComponents: new Map(), originalNames: new Map(), componentsLib: [], emptyComps: [] };
-  }
+  return { chjs, html };
 }
 
 /**
- * Build a multipage graph. Shape is a superset of chocola's ModuleGraph
- * so existing single-page code (renderPage with graph.page) keeps working:
- * - mode: "layout" | "legacy"
- * - pages: Map<route, ChocolaModule> (module.compName set in layout mode)
- * - page: root ("/") page or first page (backwards compat)
- * - layoutSource/layoutFile in layout mode
- * - loadedComponents / originalComponentNames shared across pages
- *   (in layout mode every page is also registered as a synthetic component)
+ * Discover `.chjs` page entries under the configured pages directory.
+ *
+ * @param {string} rootDir
+ * @param {{ config?: object, paths?: object }} [options]
+ * @returns {Promise<Array<{ route: string, srcRel: string, entry: string, outRel: string, filePath: string, source: string, headSource: string|null }>>}
  */
-export async function buildMultipageGraph(rootDir, { overrides } = {}) {
-  const config = overrides
-    ? await loadConfig(rootDir, { silent: true, overrides })
-    : await loadConfig(rootDir);
-  const paths = resolvePaths(rootDir, config);
+export async function discoverPages(
+  rootDir,
+  { overrides = {}, config, paths } = {}
+) {
+  const root = path.resolve(rootDir);
+  let resolvedConfig = config;
+  let resolvedPaths = paths;
 
-  const found = await loadComponentsSafe(paths.components);
-  const loadedComponents = found.loadedComponents || new Map();
-  const originalNames = found.originalNames || new Map();
+  if (!resolvedConfig) {
+    ({ config: resolvedConfig, paths: resolvedPaths } = await loadConfig(root, {
+      silent: true,
+      overrides,
+    }));
+  } else if (!resolvedPaths) {
+    resolvedPaths = resolvePaths(root, resolvedConfig);
+  }
 
-  const { mode, pages: discovered, layoutFile } = await discoverPagesInSrc(paths.src, paths);
-  if (!discovered.length) {
+  const found = await discoverPageFiles(resolvedPaths);
+  const pagesRelToSrc =
+    toPosix(path.relative(resolvedPaths.srcDir, resolvedPaths.pagesDir)) || ".";
+  const indexPath = joinPosix(pagesRelToSrc, "index.chjs");
+  const appPath = joinPosix(
+    toPosix(path.relative(resolvedPaths.srcDir, resolvedPaths.appFile)) ||
+      APP_FILE
+  );
+
+  if (found.html.length > 0) {
     throw new Error(
-      `[chocola/routing] No pages found in ${paths.src}. Add at least src/index.html (legacy mode) or src/${PAGES_DIR}/index.html with src/${APP_FILE} (layout mode). HTML files under ${config.libDir}/ and static/ are not treated as pages.`
+      `[chocola/routing] ${found.html[0]} uses .html, but pages must be .chjs files with explicit component imports. Rename it to .chjs and replace layout tags with imports.`
     );
   }
 
-  // Detect duplicate routes (e.g. about.html + about/index.html)
-  const byRoute = new Map();
-  for (const d of discovered) {
-    if (byRoute.has(d.route)) {
-      const prev = byRoute.get(d.route);
+  if (found.chjs.length === 0) {
+    const legacyIndex = path.join(resolvedPaths.srcDir, "index.html");
+    if (await pathExists(legacyIndex)) {
       throw new Error(
-        `[chocola/routing] Duplicate route ${d.route}: ${prev.srcRel} and ${d.srcRel} map to the same URL. Rename or remove one.`
+        `[chocola/routing] ${legacyIndex} uses the removed legacy single-page mode. Move it to ${indexPath} and add ${appPath}.`
       );
     }
-    byRoute.set(d.route, d);
+    throw new Error(
+      `[chocola/routing] No pages found in ${resolvedPaths.pagesDir}. Add at least ${indexPath} (rendered as /).`
+    );
   }
 
-  let layoutSource = null;
-  if (mode === "layout") {
-    layoutSource = await fs.readFile(layoutFile, "utf-8");
-    validateLayout(layoutSource, layoutFile);
-  }
+  const pages = [];
+  const byRoute = new Map();
 
-  const pages = new Map();
-  const modules = new Map();
-  const components = new Map();
+  for (const filePath of found.chjs) {
+    const pagesRel = toPosix(path.relative(resolvedPaths.pagesDir, filePath));
+    const srcRel = toPosix(path.relative(resolvedPaths.srcDir, filePath));
+    const route = filePathToRoute(pagesRel);
+    const outRel = srcRelToOutputRel(pagesRel);
+    const rawSource = await fs.readFile(filePath, "utf-8");
+    const { source, headSource } = extractPageDirectives(rawSource, filePath);
 
-  for (const [compName, source] of loadedComponents) {
-    const mod = new ChocolaModule({
-      id: path.posix.join(config.libDir, compName),
-      kind: "component",
-      sourcePath: path.join(paths.components, originalNames.get(compName) || compName),
-      source,
-      mtimeMs: null,
-    });
-    mod.deps = new Set();
-    modules.set(mod.id, mod);
-    components.set(compName, mod);
-  }
-
-  for (const d of discovered) {
-    const source = await fs.readFile(d.filePath, "utf-8");
-    let compName = null;
-    if (mode === "layout") {
-      compName = pageComponentName(d.route);
-      if (loadedComponents.has(compName)) {
-        throw new Error(
-          `[chocola/routing] Page ${d.srcRel} collides with an existing component (${compName}). Rename the component.`
-        );
-      }
-      if ([...pages.values()].some((p) => p.compName === compName)) {
-        throw new Error(
-          `[chocola/routing] Duplicate page component for route ${d.route}. Routes must differ by more than punctuation/case.`
-        );
-      }
-      // Validate the head fragment eagerly so invalid pages fail at build/startup.
-      const { sfc } = splitPageHead(source);
-      loadedComponents.set(compName, sfc);
-      originalNames.set(compName, d.srcRel);
+    if (byRoute.has(route)) {
+      throw new Error(
+        `[chocola/routing] Duplicate route ${route}: ${byRoute.get(route).srcRel} and ${srcRel} map to the same URL. Rename or remove one.`
+      );
     }
-    const mod = new ChocolaModule({
-      id: d.srcRel,
-      kind: "page",
-      sourcePath: d.filePath,
+
+    const page = {
+      route,
+      srcRel,
+      entry: srcRel,
+      outRel,
+      filePath,
       source,
-      mtimeMs: await getFileMtime(d.filePath),
-    });
-    mod.deps = new Set();
-    mod.route = d.route;
-    mod.srcRel = d.srcRel;
-    mod.outRel = d.outRel;
-    mod.compName = compName;
-    pages.set(d.route, mod);
-    modules.set(d.srcRel, mod);
+      headSource,
+    };
+    byRoute.set(route, page);
+    pages.push(page);
   }
 
-  const graph = {
-    rootDir,
-    config,
-    paths,
-    modules,
-    components,
-    loadedComponents,
-    originalComponentNames: originalNames,
-    pages,
-    page: pages.get("/") || [...pages.values()][0],
-    mode,
-    layoutSource,
-    layoutFile,
-  };
-  return graph;
+  if (!byRoute.has("/")) {
+    throw new Error(
+      `[chocola/routing] Missing ${indexPath}: the pages root must define the "/" route.`
+    );
+  }
+
+  pages.sort((a, b) => (a.route < b.route ? -1 : a.route > b.route ? 1 : 0));
+  return pages;
+}
+
+async function materializeGraphMirror(rootDir, paths, pagesBySrcRel) {
+  const graphRoot = path.join(rootDir, ".chocola", "graph");
+  await fs.rm(graphRoot, { recursive: true, force: true });
+  await fs.mkdir(graphRoot, { recursive: true });
+
+  const files = await walkFiles(paths.srcDir, {
+    skipAbs: paths.staticDir,
+    includeUnderscored: true,
+  });
+
+  for (const filePath of files) {
+    if (!filePath.toLowerCase().endsWith(CHJS_EXTENSION)) continue;
+
+    const srcRel = toPosix(path.relative(paths.srcDir, filePath));
+    const dest = path.join(graphRoot, ...srcRel.split("/"));
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+
+    const page = pagesBySrcRel.get(srcRel);
+    if (page) {
+      await fs.writeFile(dest, page.source);
+      continue;
+    }
+
+    const source = await fs.readFile(filePath, "utf-8");
+    rejectKitDirectives(source, filePath);
+    await fs.writeFile(dest, source);
+  }
+
+  return graphRoot;
+}
+
+function chunkOriginsForGraph(graph) {
+  const origins = new Map();
+  for (const id of graph.modules.keys()) {
+    origins.set(`run-${deterministicHash("module:" + id, 6)}.js`, id);
+  }
+  return origins;
 }
 
 /**
- * Build SSR route table: Map<urlPath, pageModule>.
+ * Build the Kit-owned site state: discover page entries, materialize the
+ * preprocessed `.chocola/graph` mirror, and build one core module graph per
+ * page.
+ *
+ * @param {string} rootDir
+ * @param {{ overrides?: object, config?: object, paths?: object }} [options]
+ * @returns {Promise<object>}
+ */
+export async function buildSiteState(
+  rootDir,
+  { overrides = {}, config, paths } = {}
+) {
+  const root = path.resolve(rootDir);
+  let resolvedConfig = config;
+  let resolvedPaths = paths;
+
+  if (!resolvedConfig) {
+    ({ config: resolvedConfig, paths: resolvedPaths } = await loadConfig(root, {
+      silent: true,
+      overrides,
+    }));
+  } else if (!resolvedPaths) {
+    resolvedPaths = resolvePaths(root, resolvedConfig);
+  }
+
+  const discovered = await discoverPages(root, {
+    config: resolvedConfig,
+    paths: resolvedPaths,
+  });
+
+  const pagesBySrcRel = new Map(discovered.map((page) => [page.srcRel, page]));
+  const graphRoot = await materializeGraphMirror(
+    root,
+    resolvedPaths,
+    pagesBySrcRel
+  );
+
+  for (const page of discovered) {
+    const graph = await buildModuleGraph(graphRoot, {
+      entry: page.entry,
+      config: resolvedConfig,
+    });
+    page.graph = graph;
+    page.chunkOrigins = chunkOriginsForGraph(graph);
+  }
+
+  const pages = new Map(discovered.map((page) => [page.route, page]));
+  const state = {
+    rootDir: root,
+    graphRoot,
+    config: resolvedConfig,
+    paths: resolvedPaths,
+    shell: null,
+    pages,
+    routeTable: buildRouteTable({ pages }),
+    hashMap: {},
+  };
+
+  return state;
+}
+
+/**
+ * Build SSR route table: Map<urlPath, page>.
  * Includes clean URLs, trailing-slash and .html aliases.
  */
-export function buildRouteTable(graph) {
+export function buildRouteTable(stateOrPages) {
   const table = new Map();
-  const pages = graph.pages || (graph.page ? new Map([["/", graph.page]]) : new Map());
+  const pages =
+    stateOrPages && stateOrPages.pages instanceof Map
+      ? stateOrPages.pages
+      : stateOrPages instanceof Map
+        ? stateOrPages
+        : new Map();
+
   for (const [route, page] of pages) {
-    const outRel = page.outRel || page.srcRel || page.id || "";
+    const outRel =
+      page.outRel || srcRelToOutputRel(page.entry || page.srcRel || "");
     for (const alias of routeAliases(route, outRel)) {
       if (!table.has(alias)) table.set(alias, page);
     }
-  }
-  // Backwards compat: single-page graphs without .pages
-  if (graph.page && !graph.pages) {
-    table.set("/", graph.page);
-    table.set("/index.html", graph.page);
-    table.set("/index", graph.page);
   }
   return table;
 }
@@ -565,11 +722,12 @@ export function normalizePathname(pathname) {
 }
 
 /**
- * Match a pathname against a route table (or graph).
+ * Match a pathname against a route table (or state).
  * Returns { page, route } or null.
  */
-export function matchRoute(tableOrGraph, pathname) {
-  const table = tableOrGraph instanceof Map ? tableOrGraph : buildRouteTable(tableOrGraph);
+export function matchRoute(tableOrState, pathname) {
+  const table =
+    tableOrState instanceof Map ? tableOrState : buildRouteTable(tableOrState);
   const normalized = normalizePathname(pathname);
   let page = table.get(pathname) || table.get(normalized);
   if (page) {
@@ -584,133 +742,4 @@ export function matchRoute(tableOrGraph, pathname) {
     if (page) return { page, route: page.route || normalized };
   }
   return null;
-}
-
-function absolutizeGeneratedAssets(html) {
-  return html
-    .replace(/href="\.\/(css-|sc-)/g, 'href="/$1')
-    .replace(/src="\.\/(js-|run-)/g, 'src="/$1');
-}
-
-/**
- * Render a single route. routeOrPathname can be a route ("/about")
- * or a URL pathname ("/about/", "/about.html").
- * In layout mode the page component renders inside app.html at
- * <chocolakit:body> and the page's <chocolakit:head> fragment (if any)
- * renders at the layout's <chocolakit:head> slot; in legacy mode the page
- * document renders as-is.
- */
-export async function renderRoute(graph, routeOrPathname, ctx = {}) {
-  const table = buildRouteTable(graph);
-  const matched = matchRoute(table, routeOrPathname);
-  if (!matched) {
-    throw new Error(`[chocola/routing] No route found for ${routeOrPathname}`);
-  }
-  const { page } = matched;
-  let view = graph;
-  if (graph.mode === "layout") {
-    if (!graph.layoutSource) {
-      throw new Error("[chocola/routing] Layout mode graph is missing its layout source.");
-    }
-    const tag = pageComponentTag(page.compName);
-    const withHead = injectHeadIntoLayout(graph.layoutSource, page.source, ctx);
-    const synthetic = injectPageIntoLayout(withHead, tag);
-    const pageModule = new ChocolaModule({
-      id: page.srcRel,
-      kind: "page",
-      sourcePath: page.sourcePath,
-      source: synthetic,
-      mtimeMs: page.mtimeMs,
-    });
-    // Shallow view (no graph.page mutation, safe under concurrent requests)
-    view = { ...graph, page: pageModule };
-  } else {
-    view = { ...graph, page };
-  }
-  const result = await renderPage(view, ctx);
-  return {
-    ...result,
-    html: absolutizeGeneratedAssets(result.html),
-    page,
-    route: page.route,
-  };
-}
-
-/**
- * Emit all routes to outDir.
- * Layout mode preserves pages/ structure minus the prefix:
- * pages/index.html -> dist/index.html, pages/blog/post.html -> dist/blog/post.html.
- * Legacy mode preserves src structure: src/about.html -> dist/about.html.
- */
-export async function emitMultipage(graph, { ctx, ctxPerRoute } = {}) {
-  const outDir = graph.paths.outDir;
-  if (graph.config.emptyOutDir) {
-    await fs.rm(outDir, { recursive: true, force: true });
-    await fs.mkdir(outDir, { recursive: true });
-  } else {
-    await fs.mkdir(outDir, { recursive: true });
-  }
-
-  const seenFiles = new Map(); // path -> content
-  const seenCopies = new Map(); // `${from}->${to}` -> op
-  const mergedHashMap = {};
-  const results = new Map();
-
-  const routes = [...graph.pages.keys()].sort();
-  for (const route of routes) {
-    const page = graph.pages.get(route);
-    const routeCtx = { ...(ctx || {}), ...((ctxPerRoute && ctxPerRoute[route]) || {}) };
-    const result = await renderRoute(graph, route, routeCtx);
-    results.set(route, result);
-    Object.assign(mergedHashMap, result.hashMap || {});
-    for (const file of result.files) {
-      if (!seenFiles.has(file.path)) seenFiles.set(file.path, file.content);
-    }
-    for (const copy of result.copies) {
-      const key = `${copy.from}->${copy.to}`;
-      if (!seenCopies.has(key)) seenCopies.set(key, copy);
-    }
-    const outRel = srcRelToOutputRel(page.outRel || page.srcRel || page.id);
-    const outAbs = path.join(outDir, outRel);
-    await fs.mkdir(path.dirname(outAbs), { recursive: true });
-    await fs.writeFile(outAbs, result.html);
-  }
-
-  for (const [rel, content] of seenFiles) {
-    const abs = path.join(outDir, rel);
-    await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, content);
-  }
-
-  for (const copy of seenCopies.values()) {
-    if (copy.recursive) {
-      await fs.cp(copy.from, copy.to, { recursive: true, force: true });
-    } else {
-      await fs.mkdir(path.dirname(copy.to), { recursive: true });
-      try {
-        await fs.copyFile(copy.from, copy.to);
-      } catch {
-        // Missing asset (e.g. optional icon): skip, per-page render already succeeded
-      }
-    }
-  }
-
-  const chocolaDir = path.join(graph.rootDir, ".chocola");
-  await fs.mkdir(chocolaDir, { recursive: true });
-  await fs.writeFile(path.join(chocolaDir, "hashes.json"), JSON.stringify(mergedHashMap, null, 2) + "\n");
-
-  return {
-    results,
-    files: [...seenFiles.entries()].map(([rel, content]) => ({ path: rel, content })),
-    copies: [...seenCopies.values()],
-    hashMap: mergedHashMap,
-  };
-}
-
-/**
- * Compile a rootDir (multipage-aware replacement for chocola's compile()).
- */
-export default async function compileMultipage(rootDir, { overrides } = {}) {
-  const graph = await buildMultipageGraph(rootDir, { overrides });
-  return emitMultipage(graph);
 }
