@@ -4,6 +4,7 @@ import path from "path";
 // Chocola imports
 import { buildModuleGraph } from "chocola/compiler/index.js";
 import { deterministicHash } from "chocola/compiler/utils.js";
+import { compileExpr } from "chocola/parser/index.js";
 
 import { loadConfig, resolvePaths } from "./config.js";
 
@@ -24,6 +25,8 @@ export const HEAD_SLOT_TAG = "chocolakit:head";
 
 const CHJS_EXTENSION = ".chjs";
 const HTML_EXTENSION = ".html";
+
+const warnedHeadSlots = new WeakSet();
 
 const HEAD_ALLOWED_TAGS = new Set([
   "title",
@@ -443,6 +446,298 @@ export function extractPageDirectives(source, filePath) {
   };
 }
 
+function collectSlotTags(source, tagName) {
+  const slots = [];
+
+  for (const tag of scanTags(source, {
+    skipBlocks: new Set(["script", "style"]),
+  })) {
+    if (tag.type !== "start" || tag.lowerName !== tagName) continue;
+
+    if (tag.selfClosing) {
+      slots.push({
+        start: tag.start,
+        end: tag.end,
+        selfClosing: true,
+      });
+      continue;
+    }
+
+    const close = findBlockClose(source, tag.end, tagName);
+    slots.push({
+      start: tag.start,
+      end: close ? close.end : null,
+      selfClosing: false,
+    });
+  }
+
+  return slots;
+}
+
+function findOpeningTag(source, tagName) {
+  for (const tag of scanTags(source, {
+    skipBlocks: new Set(["script", "style"]),
+  })) {
+    if (tag.type === "start" && tag.lowerName === tagName) return tag;
+  }
+  return null;
+}
+
+function findClosingTag(source, tagName) {
+  for (const tag of scanTags(source, {
+    skipBlocks: new Set(["script", "style"]),
+  })) {
+    if (tag.type === "end" && tag.lowerName === tagName) return tag;
+  }
+  return null;
+}
+
+function replaceSlot(html, tagName, replacement, label) {
+  const slots = collectSlotTags(html, tagName);
+  if (slots.length !== 1) {
+    throw new Error(
+      `[chocola/routing] ${label}: expected exactly one <${tagName}> slot (found ${slots.length}).`
+    );
+  }
+  if (slots[0].end === null) {
+    throw new Error(
+      `[chocola/routing] ${label}: unclosed <${tagName}> slot.`
+    );
+  }
+  return html.slice(0, slots[0].start) + replacement + html.slice(slots[0].end);
+}
+
+function insertBeforeClosingTag(html, tagName, content) {
+  if (!content) return html;
+  const close = findClosingTag(html, tagName);
+  if (!close) return html;
+  return html.slice(0, close.start) + content + html.slice(close.start);
+}
+
+async function loadShell(paths) {
+  const file = paths.appFile;
+  let source;
+
+  try {
+    source = await fs.readFile(file, "utf-8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      throw new Error(
+        `[chocola/routing] Missing document shell at ${file}. Create it with exactly one <${BODY_SLOT_TAG}>, an optional <${HEAD_SLOT_TAG}> inside <head>, and closing </head>/</body> tags.`
+      );
+    }
+    throw new Error(
+      `[chocola/routing] Cannot read document shell at ${file}: ${err && err.message ? err.message : err}`
+    );
+  }
+
+  if (source.charCodeAt(0) === 0xfeff) source = source.slice(1);
+
+  for (const tag of scanTags(source, {
+    skipBlocks: new Set(["script", "style"]),
+  })) {
+    if (tag.type === "start" && tag.lowerName === "app") {
+      throw new Error(
+        `[chocola/routing] ${file}: <app> is no longer supported in ${APP_FILE}. Render pages directly into <${BODY_SLOT_TAG}>.`
+      );
+    }
+  }
+
+  const bodySlots = collectSlotTags(source, BODY_SLOT_TAG);
+  if (bodySlots.length !== 1) {
+    throw new Error(
+      `[chocola/routing] ${file}: document shell must contain exactly one <${BODY_SLOT_TAG}> (found ${
+        bodySlots.length === 0 ? "none" : bodySlots.length
+      }).`
+    );
+  }
+  if (bodySlots[0].end === null) {
+    throw new Error(
+      `[chocola/routing] ${file}: unclosed <${BODY_SLOT_TAG}> slot.`
+    );
+  }
+
+  const headSlots = collectSlotTags(source, HEAD_SLOT_TAG);
+  if (headSlots.length > 1) {
+    throw new Error(
+      `[chocola/routing] ${file}: document shell must contain at most one <${HEAD_SLOT_TAG}> (found ${headSlots.length}).`
+    );
+  }
+  if (headSlots.length === 1 && headSlots[0].end === null) {
+    throw new Error(
+      `[chocola/routing] ${file}: unclosed <${HEAD_SLOT_TAG}> slot.`
+    );
+  }
+
+  const headClose = findClosingTag(source, "head");
+  if (!headClose) {
+    throw new Error(
+      `[chocola/routing] ${file}: document shell must contain a closing </head>.`
+    );
+  }
+
+  const bodyClose = findClosingTag(source, "body");
+  if (!bodyClose) {
+    throw new Error(
+      `[chocola/routing] ${file}: document shell must contain a closing </body>.`
+    );
+  }
+
+  if (headSlots.length === 1) {
+    const headOpen = findOpeningTag(source, "head");
+    if (
+      !headOpen ||
+      headSlots[0].start < headOpen.end ||
+      headSlots[0].start > headClose.start
+    ) {
+      throw new Error(
+        `[chocola/routing] ${file}: <${HEAD_SLOT_TAG}> must be inside <head>.`
+      );
+    }
+  }
+
+  return {
+    source,
+    file,
+    headSlot: headSlots.length === 1,
+    bodySlot: true,
+  };
+}
+
+function resolveHeadContext(page, ctx) {
+  const merged = { ...(ctx || {}) };
+  const props =
+    page && page.graph && page.graph.root && page.graph.root.compProps
+      ? page.graph.root.compProps
+      : [];
+
+  for (const prop of props) {
+    if (!prop || !prop.name || prop.defaultValue === undefined) continue;
+    if (prop.name in merged) continue;
+
+    if (typeof prop.defaultValue === "string") {
+      try {
+        merged[prop.name] = compileExpr(prop.defaultValue, false)();
+      } catch {
+        merged[prop.name] = prop.defaultValue;
+      }
+    } else {
+      merged[prop.name] = prop.defaultValue;
+    }
+  }
+
+  return new Proxy(merged, {
+    has() {
+      return true;
+    },
+    get(target, key) {
+      if (key in target) return target[key];
+      return globalThis[key];
+    },
+  });
+}
+
+function interpolateHead(head, page, ctx) {
+  if (!head) return "";
+
+  const context = resolveHeadContext(page, ctx);
+  const protectedBlocks = [];
+  const guarded = head.replace(
+    /<!--[\s\S]*?-->|<(style|noscript)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi,
+    (match) => {
+      const token = `\u0000${protectedBlocks.length}\u0000`;
+      protectedBlocks.push(match);
+      return token;
+    }
+  );
+
+  const interpolated = guarded.replace(/\{([^}]+)\}/g, (_, expression) => {
+    try {
+      const value = compileExpr(expression.trim(), true)(context);
+      return value == null ? "" : String(value);
+    } catch {
+      return "";
+    }
+  });
+
+  return interpolated
+    .replace(/\u0000(\d+)\u0000/g, (_, index) => protectedBlocks[Number(index)])
+    .trim();
+}
+
+/**
+ * Assemble a complete HTML document from the required shell, the page head,
+ * the core render result, and the runtime chunks.
+ *
+ * @param {{ state: object, page: object, ctx?: object, result?: object, runtime?: Array<{name: string}>|Array<string> }} options
+ * @returns {string}
+ */
+export function assembleDocument({
+  state,
+  page,
+  ctx = {},
+  result = {},
+  runtime,
+} = {}) {
+  if (!state || !state.shell) {
+    throw new Error(
+      "[chocola/routing] assembleDocument requires a state with a loaded document shell."
+    );
+  }
+
+  let html = state.shell.source;
+  if (!/^\uFEFF?\s*<!doctype\b/i.test(html)) {
+    html = "<!doctype html>\n" + html;
+  }
+
+  const headFragment = interpolateHead(page && page.headSource, page, ctx);
+
+  if (state.shell.headSlot) {
+    html = replaceSlot(html, HEAD_SLOT_TAG, headFragment, state.shell.file);
+  } else if (headFragment) {
+    html = insertBeforeClosingTag(html, "head", headFragment + "\n");
+    if (!warnedHeadSlots.has(state)) {
+      warnedHeadSlots.add(state);
+      console.warn(
+        `[chocola/routing] ${state.shell.file} has no <${HEAD_SLOT_TAG}> slot; page head content is appended before </head>.`
+      );
+    }
+  }
+
+  const styles = result && result.styles;
+  if (styles) {
+    const stylesFile = `sc-${deterministicHash(styles, 6)}.css`;
+    html = insertBeforeClosingTag(
+      html,
+      "head",
+      `<link rel="stylesheet" href="/${stylesFile}">\n`
+    );
+  }
+
+  const bodyHtml = result && result.html != null ? result.html : "";
+  html = replaceSlot(html, BODY_SLOT_TAG, bodyHtml, state.shell.file);
+
+  const chunks = Array.isArray(runtime)
+    ? runtime
+    : Array.isArray(result && result.runtime)
+      ? result.runtime
+      : [];
+  const runtimeTags = chunks
+    .map((chunk) => (typeof chunk === "string" ? chunk : chunk && chunk.name))
+    .filter(Boolean)
+    .map(
+      (name) =>
+        `<script type="module" src="/${String(name).replace(/^\/+/, "")}"></script>`
+    )
+    .join("\n");
+
+  if (runtimeTags) {
+    html = insertBeforeClosingTag(html, "body", runtimeTags + "\n");
+  }
+
+  return html;
+}
+
 async function walkFiles(
   dir,
   { skipAbs = null, includeUnderscored = true, includeHiddenFiles = true } = {}
@@ -659,6 +954,7 @@ export async function buildSiteState(
     config: resolvedConfig,
     paths: resolvedPaths,
   });
+  const shell = await loadShell(resolvedPaths);
 
   const pagesBySrcRel = new Map(discovered.map((page) => [page.srcRel, page]));
   const graphRoot = await materializeGraphMirror(
@@ -682,7 +978,7 @@ export async function buildSiteState(
     graphRoot,
     config: resolvedConfig,
     paths: resolvedPaths,
-    shell: null,
+    shell,
     pages,
     routeTable: buildRouteTable({ pages }),
     hashMap: {},
