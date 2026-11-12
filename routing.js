@@ -2,7 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 
 // Chocola imports
-import { buildModuleGraph } from "chocola/compiler/index.js";
+import { buildModuleGraph, render } from "chocola/compiler/index.js";
 import { deterministicHash } from "chocola/compiler/utils.js";
 import { compileExpr } from "chocola/parser/index.js";
 
@@ -27,6 +27,7 @@ const CHJS_EXTENSION = ".chjs";
 const HTML_EXTENSION = ".html";
 
 const warnedHeadSlots = new WeakSet();
+const warnedImportRewrites = new WeakMap();
 
 const HEAD_ALLOWED_TAGS = new Set([
   "title",
@@ -669,7 +670,7 @@ function interpolateHead(head, page, ctx) {
  * Assemble a complete HTML document from the required shell, the page head,
  * the core render result, and the runtime chunks.
  *
- * @param {{ state: object, page: object, ctx?: object, result?: object, runtime?: Array<{name: string}>|Array<string> }} options
+ * @param {{ state: object, page: object, ctx?: object, result?: object, runtime?: Array<{name: string}>|Array<string>, head?: string }} options
  * @returns {string}
  */
 export function assembleDocument({
@@ -678,6 +679,7 @@ export function assembleDocument({
   ctx = {},
   result = {},
   runtime,
+  head,
 } = {}) {
   if (!state || !state.shell) {
     throw new Error(
@@ -690,7 +692,10 @@ export function assembleDocument({
     html = "<!doctype html>\n" + html;
   }
 
-  const headFragment = interpolateHead(page && page.headSource, page, ctx);
+  const headFragment =
+    typeof head === "string"
+      ? head
+      : interpolateHead(page && page.headSource, page, ctx);
 
   if (state.shell.headSlot) {
     html = replaceSlot(html, HEAD_SLOT_TAG, headFragment, state.shell.file);
@@ -1023,7 +1028,11 @@ export function normalizePathname(pathname) {
  */
 export function matchRoute(tableOrState, pathname) {
   const table =
-    tableOrState instanceof Map ? tableOrState : buildRouteTable(tableOrState);
+    tableOrState instanceof Map
+      ? tableOrState
+      : tableOrState && tableOrState.routeTable instanceof Map
+        ? tableOrState.routeTable
+        : buildRouteTable(tableOrState);
   const normalized = normalizePathname(pathname);
   let page = table.get(pathname) || table.get(normalized);
   if (page) {
@@ -1038,4 +1047,481 @@ export function matchRoute(tableOrState, pathname) {
     if (page) return { page, route: page.route || normalized };
   }
   return null;
+}
+
+function warnImportOnce(state, key, message) {
+  let warned = warnedImportRewrites.get(state);
+  if (!warned) {
+    warned = new Set();
+    warnedImportRewrites.set(state, warned);
+  }
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.warn(message);
+}
+
+function splitSpecifierSuffix(specifier) {
+  const index = specifier.search(/[?#]/);
+  return index === -1
+    ? [specifier, ""]
+    : [specifier.slice(0, index), specifier.slice(index)];
+}
+
+/**
+ * Rewrite one relative non-`.chjs` specifier into a src-relative URL.
+ * Returns `null` when the specifier must stay unchanged.
+ */
+function rewriteImportSpecifier(state, moduleId, specifier) {
+  const value = String(specifier);
+  if (!value) return null;
+  // Absolute URLs and non-relative specifiers stay untouched.
+  if (value.startsWith("/")) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return null;
+
+  if (!value.startsWith("./") && !value.startsWith("../")) {
+    warnImportOnce(
+      state,
+      `bare:${moduleId}:${value}`,
+      `[chocola/routing] ${moduleId}: bare import "${value}" is left unchanged. Use a relative file path or an import map.`
+    );
+    return null;
+  }
+
+  // Core's generated inter-chunk imports already point at flat run-*.js URLs.
+  if (/^\.\/run-[a-z]{6}\.js(?:[?#].*)?$/.test(value)) return null;
+
+  const [pathPart, suffix] = splitSpecifierSuffix(value);
+  if (!pathPart) return null;
+
+  const resolved = path.posix.normalize(
+    path.posix.join(path.posix.dirname(moduleId), pathPart)
+  );
+
+  if (
+    resolved === ".." ||
+    resolved.startsWith("../") ||
+    path.posix.isAbsolute(resolved)
+  ) {
+    warnImportOnce(
+      state,
+      `escape:${moduleId}:${value}`,
+      `[chocola/routing] ${moduleId}: import "${value}" escapes srcDir and is left unchanged.`
+    );
+    return null;
+  }
+
+  return `/${resolved}${suffix}`;
+}
+
+function replaceImportSource(raw, source, next) {
+  const index = raw.indexOf(source);
+  if (index === -1) return raw;
+  const before = raw[index - 1];
+  const after = raw[index + source.length];
+  if ((before !== '"' && before !== "'") || after !== before) return raw;
+  return raw.slice(0, index) + next + raw.slice(index + source.length);
+}
+
+function moduleImportRewrites(state, page, moduleId) {
+  if (!page.importRewrites) page.importRewrites = new Map();
+  if (page.importRewrites.has(moduleId)) {
+    return page.importRewrites.get(moduleId);
+  }
+
+  const rewrites = new Map();
+  const module = page.graph.modules.get(moduleId);
+
+  for (const imp of (module && module.imports) || []) {
+    if (!imp || !imp.source || !imp.raw) continue;
+    if (String(imp.source).toLowerCase().endsWith(CHJS_EXTENSION)) continue;
+
+    const next = rewriteImportSpecifier(state, moduleId, imp.source);
+    if (next === null) continue;
+
+    const raw = imp.raw.trim();
+    const rewritten = replaceImportSource(raw, String(imp.source), next);
+    if (rewritten !== raw) rewrites.set(raw, rewritten);
+  }
+
+  page.importRewrites.set(moduleId, rewrites);
+  return rewrites;
+}
+
+/**
+ * Rewrite relative non-`.chjs` imports inside one runtime chunk.
+ * Base and hydration chunks have no module origin and are left untouched.
+ */
+function rewriteRuntimeChunk(state, page, chunk) {
+  if (!chunk || !chunk.name || typeof chunk.content !== "string") return chunk;
+
+  const origin =
+    page.chunkOrigins && page.chunkOrigins.get(String(chunk.name));
+  if (!origin) return chunk;
+
+  const rewrites = moduleImportRewrites(state, page, origin);
+  if (rewrites.size === 0) return chunk;
+
+  let content = chunk.content;
+  for (const [from, to] of rewrites) {
+    if (content.includes(from)) content = content.split(from).join(to);
+  }
+  return { ...chunk, content };
+}
+
+const RUNTIME_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+function assertRuntimeName(name) {
+  const value = String(name);
+  if (
+    !RUNTIME_NAME_PATTERN.test(value) ||
+    value === "." ||
+    value === ".." ||
+    value !== path.basename(value)
+  ) {
+    throw new Error(`[chocola/routing] Invalid runtime file name: ${name}`);
+  }
+  return value;
+}
+
+/**
+ * Memory cache plus disk fallback for core runtime chunks.
+ *
+ * Disk lives under `<rootDir>/.chocola/runtime/` and is cleared on first use
+ * (process startup) or when `clear()` is called on rebuild.
+ */
+export class RuntimeStore {
+  constructor(rootDir, { memoryLimit = 256 } = {}) {
+    this.rootDir = path.resolve(rootDir);
+    this.dir = path.join(this.rootDir, ".chocola", "runtime");
+    this.memoryLimit =
+      Number.isFinite(memoryLimit) && memoryLimit > 0
+        ? Math.floor(memoryLimit)
+        : 256;
+    this.memory = new Map();
+    this.names = new Set();
+    this.disk = new Set();
+    this.ready = null;
+  }
+
+  ensureReady() {
+    if (!this.ready) {
+      this.ready = (async () => {
+        await fs.rm(this.dir, { recursive: true, force: true });
+        await fs.mkdir(this.dir, { recursive: true });
+      })();
+    }
+    return this.ready;
+  }
+
+  remember(name, content) {
+    if (this.memory.has(name)) this.memory.delete(name);
+    this.memory.set(name, content);
+    while (this.memory.size > this.memoryLimit) {
+      const oldest = this.memory.keys().next().value;
+      this.memory.delete(oldest);
+    }
+  }
+
+  async add(files) {
+    await this.ensureReady();
+    const list = Array.isArray(files) ? files : files ? [files] : [];
+
+    for (const file of list) {
+      if (!file || !file.name) continue;
+      const name = assertRuntimeName(file.name);
+      const content =
+        typeof file.content === "string"
+          ? file.content
+          : String(file.content ?? "");
+
+      this.names.add(name);
+      this.remember(name, content);
+
+      if (!this.disk.has(name)) {
+        await fs.writeFile(path.join(this.dir, name), content);
+        this.disk.add(name);
+      }
+    }
+
+    return list.map((file) => (file && file.name ? String(file.name) : null)).filter(Boolean);
+  }
+
+  async get(name) {
+    const safeName = assertRuntimeName(name);
+    if (this.memory.has(safeName)) return this.memory.get(safeName);
+
+    await this.ensureReady();
+    try {
+      const content = await fs.readFile(path.join(this.dir, safeName), "utf-8");
+      this.names.add(safeName);
+      this.disk.add(safeName);
+      this.remember(safeName, content);
+      return content;
+    } catch (err) {
+      if (err && err.code === "ENOENT") return null;
+      throw err;
+    }
+  }
+
+  has(name) {
+    try {
+      const safeName = assertRuntimeName(name);
+      return this.memory.has(safeName) || this.disk.has(safeName);
+    } catch {
+      return false;
+    }
+  }
+
+  async writeTo(dir) {
+    const target = path.resolve(dir);
+    await fs.mkdir(target, { recursive: true });
+
+    const written = [];
+    for (const name of [...this.names].sort()) {
+      const content = this.memory.has(name)
+        ? this.memory.get(name)
+        : await this.get(name);
+      if (content == null) continue;
+      await fs.writeFile(path.join(target, name), content);
+      written.push(name);
+    }
+    return written;
+  }
+
+  async clear() {
+    this.memory.clear();
+    this.names.clear();
+    this.disk.clear();
+    this.ready = (async () => {
+      await fs.rm(this.dir, { recursive: true, force: true });
+      await fs.mkdir(this.dir, { recursive: true });
+    })();
+    await this.ready;
+  }
+}
+
+function resolveRouteContext(ctx, ctxPerRoute, route, page) {
+  const base = ctx && typeof ctx === "object" ? ctx : {};
+  if (!ctxPerRoute) return { ...base };
+  if (typeof ctxPerRoute === "function") {
+    return { ...base, ...(ctxPerRoute(route, page) || {}) };
+  }
+  return { ...base, ...(ctxPerRoute[route] || {}) };
+}
+
+function sortedHashMap(hashMap) {
+  const sorted = {};
+  for (const key of Object.keys(hashMap || {}).sort()) {
+    sorted[key] = hashMap[key];
+  }
+  return sorted;
+}
+
+/**
+ * Persist the merged CSS hash map to `<rootDir>/.chocola/hashes.json`.
+ * Keys are sorted and the file has a trailing newline.
+ */
+export async function writeHashMap(state, hashMap) {
+  const dir = path.join(state.rootDir, ".chocola");
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, "hashes.json");
+  await fs.writeFile(
+    file,
+    JSON.stringify(sortedHashMap(hashMap), null, 2) + "\n"
+  );
+  return file;
+}
+
+/**
+ * Render one route to a complete HTML document.
+ *
+ * @param {object} state site state from `buildSiteState`
+ * @param {string} routeOrPathname route or URL pathname
+ * @param {object} [ctx] per-request context
+ * @returns {Promise<{ page: object, route: string, html: string, styles: string, runtime: Array<{name:string,content:string}>, hashMap: object, head: string|null }>}
+ */
+export async function renderRoute(state, routeOrPathname, ctx = {}) {
+  if (!state || !(state.pages instanceof Map)) {
+    throw new Error(
+      "[chocola/routing] renderRoute requires a site state from buildSiteState."
+    );
+  }
+
+  const matched = matchRoute(state, routeOrPathname);
+  if (!matched) {
+    throw new Error(`[chocola/routing] No route found for ${routeOrPathname}`);
+  }
+
+  const { page, route } = matched;
+  const result = await render(page.graph, ctx);
+  const runtime = (result.runtime || []).map((chunk) =>
+    rewriteRuntimeChunk(state, page, chunk)
+  );
+  const head = page.headSource
+    ? interpolateHead(page.headSource, page, ctx)
+    : null;
+
+  const html = assembleDocument({
+    state,
+    page,
+    ctx,
+    result: { ...result, runtime },
+    runtime,
+    head: head === null ? "" : head,
+  });
+
+  return {
+    page,
+    route,
+    html,
+    styles: result.styles || "",
+    runtime,
+    hashMap: result.hashMap || {},
+    head,
+  };
+}
+
+async function collectAssetCopies(state) {
+  const { srcDir, staticDir, outDir, appFile } = state.paths;
+  const copies = [];
+  const seen = new Set();
+
+  const staticRel = toPosix(path.relative(srcDir, staticDir));
+  if (
+    staticRel &&
+    !staticRel.startsWith("..") &&
+    !path.isAbsolute(staticRel) &&
+    (await pathExists(staticDir))
+  ) {
+    copies.push({
+      from: staticDir,
+      to: path.join(outDir, ...staticRel.split("/")),
+      relative: staticRel,
+      recursive: true,
+    });
+  }
+
+  const files = await walkFiles(srcDir, {
+    skipAbs: staticDir,
+    includeUnderscored: true,
+  });
+
+  for (const file of files) {
+    if (isInside(file, outDir)) continue;
+    if (path.resolve(file) === path.resolve(appFile)) continue;
+    if (file.toLowerCase().endsWith(CHJS_EXTENSION)) continue;
+
+    const rel = toPosix(path.relative(srcDir, file));
+    if (!rel || rel.startsWith("..") || seen.has(rel)) continue;
+    seen.add(rel);
+    copies.push({
+      from: file,
+      to: path.join(outDir, ...rel.split("/")),
+      relative: rel,
+    });
+  }
+
+  return copies;
+}
+
+/**
+ * Emit every route, scoped stylesheet, runtime chunk, and copied asset.
+ *
+ * @param {object} state site state from `buildSiteState`
+ * @param {{ ctx?: object, ctxPerRoute?: object|Function }} [options]
+ * @returns {Promise<{ results: Map<string, object>, files: Array<{path:string,content:string}>, copies: Array<object>, hashMap: object, runtime: Array<{name:string,content:string}> }>}
+ */
+export async function emitSite(state, { ctx = {}, ctxPerRoute } = {}) {
+  if (!state || !(state.pages instanceof Map)) {
+    throw new Error(
+      "[chocola/routing] emitSite requires a site state from buildSiteState."
+    );
+  }
+
+  const outDir = state.paths.outDir;
+  if (state.config && state.config.emptyOutDir !== false) {
+    await fs.rm(outDir, { recursive: true, force: true });
+  }
+  await fs.mkdir(outDir, { recursive: true });
+
+  const copies = await collectAssetCopies(state);
+
+  // Copy author assets first so generated files always win on collision.
+  for (const copy of copies) {
+    if (copy.recursive) {
+      await fs.cp(copy.from, copy.to, { recursive: true, force: true });
+    } else {
+      await fs.mkdir(path.dirname(copy.to), { recursive: true });
+      await fs.copyFile(copy.from, copy.to);
+    }
+  }
+
+  const results = new Map();
+  const generated = new Map();
+  const runtimeByName = new Map();
+  const mergedHashMap = {};
+
+  for (const route of [...state.pages.keys()].sort()) {
+    const page = state.pages.get(route);
+    const routeCtx = resolveRouteContext(ctx, ctxPerRoute, route, page);
+    const rendered = await renderRoute(state, route, routeCtx);
+    results.set(route, rendered);
+
+    Object.assign(mergedHashMap, rendered.hashMap);
+
+    if (rendered.styles) {
+      const name = `sc-${deterministicHash(rendered.styles, 6)}.css`;
+      if (!generated.has(name)) generated.set(name, rendered.styles);
+    }
+
+    for (const chunk of rendered.runtime) {
+      if (!runtimeByName.has(chunk.name)) {
+        runtimeByName.set(chunk.name, chunk.content);
+      }
+    }
+
+    const outAbs = path.join(outDir, ...page.outRel.split("/"));
+    await fs.mkdir(path.dirname(outAbs), { recursive: true });
+    await fs.writeFile(outAbs, rendered.html);
+  }
+
+  for (const [name, content] of [...generated].sort(([a], [b]) =>
+    a.localeCompare(b)
+  )) {
+    await fs.writeFile(path.join(outDir, name), content);
+  }
+
+  const runtime = [...runtimeByName]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, content]) => ({ name, content }));
+
+  for (const chunk of runtime) {
+    await fs.writeFile(path.join(outDir, chunk.name), chunk.content);
+    generated.set(chunk.name, chunk.content);
+  }
+
+  const hashMap = sortedHashMap(mergedHashMap);
+  await writeHashMap(state, hashMap);
+  state.hashMap = hashMap;
+
+  return {
+    results,
+    files: [...generated]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([filePath, content]) => ({ path: filePath, content })),
+    copies,
+    hashMap,
+    runtime,
+  };
+}
+
+/**
+ * Compile a site: build state and emit every route to `outDir`.
+ */
+export default async function compileMultipage(
+  rootDir,
+  { overrides = {}, config, paths } = {}
+) {
+  const state = await buildSiteState(rootDir, { overrides, config, paths });
+  return emitSite(state);
 }
