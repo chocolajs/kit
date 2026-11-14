@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createRequire } from "module";
 import { readFile } from "fs/promises";
+import { realpathSync } from "fs";
 
 import { loadConfig } from "../config.js";
 import { isMissingConfigFile } from "../utils.js";
@@ -198,8 +199,8 @@ export async function main() {
 
     switch (cmd) {
       case "build": {
-        const routingMod = await import("../routing.js");
-        await routingMod.default(rootDir, { overrides: cliOverrides, config: base, paths });
+        const { default: compileMultipage } = await import("../routing.js");
+        await compileMultipage(rootDir, { config: base, paths });
         process.exit(0);
       }
       case "dev": {
@@ -245,7 +246,17 @@ export async function main() {
   }
 }
 
-if (process.argv[1] === __filename) {
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  const invoked = path.resolve(process.argv[1]);
+  try {
+    return realpathSync(invoked) === realpathSync(__filename);
+  } catch {
+    return invoked === __filename;
+  }
+}
+
+if (isEntryPoint()) {
   main().catch(err => {
     console.error(err.message || err);
     process.exit(1);
