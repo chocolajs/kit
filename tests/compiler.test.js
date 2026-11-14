@@ -1,4 +1,4 @@
-import { test, before, after } from "node:test";
+import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "fs";
 import os from "os";
@@ -6,33 +6,46 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 // Chocola imports
-import compile, {
+import {
   buildModuleGraph,
-  renderPage,
-  emit,
-  app,
+  render,
+  compile,
+  normalizeConfig,
   ModuleGraph,
   ChocolaModule,
 } from "chocola/compiler/index.js";
 import { deterministicHash } from "chocola/compiler/utils.js";
 
+import { buildSiteState, renderRoute } from "../routing.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(__dirname, "fixtures", "basic");
 
-let tmpParent;
-let tmpRoot;
-let graph;
+const GREETING = `<script>
+  export let name = "World";
+  let mounted = false;
+  function $runtime() {
+    mounted = true;
+  }
+</script>
+<template>
+  <div class="greeting">Hello {name}!</div>
+</template>
+<style>
+  .greeting { color: blue; }
+</style>`;
 
-before(async () => {
-  tmpParent = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-test-"));
-  tmpRoot = path.join(tmpParent, "app");
-  await fs.cp(FIXTURE, tmpRoot, { recursive: true });
-  graph = await buildModuleGraph(tmpRoot);
-});
-
-after(async () => {
-  await fs.rm(tmpParent, { recursive: true, force: true });
-});
+const CORE_PAGE = `<script>
+  import "./format.js";
+  import Greeting from "./lib/greeting.chjs";
+  export let title = "Core";
+</script>
+<template>
+  <main>
+    <h1>{title}</h1>
+    <Greeting />
+  </main>
+</template>`;
 
 async function listDir(dir) {
   try {
@@ -42,139 +55,215 @@ async function listDir(dir) {
   }
 }
 
-function runtimeFunctionNames(result) {
-  const file = result.files.find((f) => f.content.includes("DOMContentLoaded"));
-  assert.ok(file, "expected a DOMContentLoaded runtime chunk");
-  const names = [
-    ...new Set(
-      [...file.content.matchAll(/\br_[a-z]{8}\s*\(/g)].map((m) => m[0].replace(/\s*\($/, ""))
-    ),
-  ];
-  return names;
+async function makeCoreApp() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-core-"));
+  await fs.mkdir(path.join(root, "lib"), { recursive: true });
+  await fs.writeFile(path.join(root, "page.chjs"), CORE_PAGE);
+  await fs.writeFile(path.join(root, "lib", "greeting.chjs"), GREETING);
+  await fs.writeFile(path.join(root, "format.js"), "export const core = true;\n");
+  await fs.writeFile(
+    path.join(root, "lib", "unused.chjs"),
+    `<template><div>unused</div></template>`
+  );
+  return root;
 }
 
-test("compiler entry point exports the module pipeline", () => {
-  assert.equal(typeof buildModuleGraph, "function");
-  assert.equal(typeof renderPage, "function");
-  assert.equal(typeof emit, "function");
-  assert.equal(typeof compile, "function");
-  assert.equal(typeof app.build, "function");
-  assert.equal(typeof ModuleGraph, "function");
-  assert.equal(typeof ChocolaModule, "function");
-});
+async function makeFixtureCopy() {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-kit-core-"));
+  const root = path.join(parent, "app");
+  await fs.cp(FIXTURE, root, { recursive: true });
+  return { parent, root };
+}
 
-test("buildModuleGraph discovers page, components and asset modules", () => {
-  assert.ok(graph instanceof ModuleGraph);
-  assert.ok(graph.page instanceof ChocolaModule);
-  assert.equal(graph.page.id, "index.html");
-  assert.equal(graph.page.kind, "page");
+describe("compiler — core import-based API", () => {
+  let coreRoot;
+  let graph;
 
-  for (const comp of ["greeting.html", "counter.html", "card.html", "action.html"]) {
-    assert.ok(graph.components.has(comp), `missing component module ${comp}`);
-    assert.equal(graph.components.get(comp).kind, "component");
-  }
+  before(async () => {
+    coreRoot = await makeCoreApp();
+    graph = await buildModuleGraph(coreRoot, { entry: "page.chjs" });
+  });
 
-  for (const id of ["styles.css", "favicon.ico", "app.js"]) {
-    assert.ok(graph.modules.has(id), `missing asset module ${id}`);
-  }
+  after(async () => {
+    if (coreRoot) await fs.rm(coreRoot, { recursive: true, force: true });
+  });
 
-  for (const dep of [
-    "lib/greeting.html",
-    "lib/counter.html",
-    "lib/card.html",
-    "styles.css",
-    "favicon.ico",
-    "app.js",
-  ]) {
-    assert.ok(graph.page.deps.has(dep), `page missing dep ${dep}`);
-  }
+  test("entry point exports the module pipeline", () => {
+    assert.equal(typeof buildModuleGraph, "function");
+    assert.equal(typeof render, "function");
+    assert.equal(typeof compile, "function");
+    assert.equal(typeof normalizeConfig, "function");
+    assert.equal(typeof ModuleGraph, "function");
+    assert.equal(typeof ChocolaModule, "function");
+  });
 
-  assert.ok(graph.components.get("card.html").deps.has("lib/action.html"), "card should depend on action (tag + import)");
-});
+  test("buildModuleGraph follows explicit .chjs imports only", () => {
+    assert.ok(graph instanceof ModuleGraph);
+    assert.ok(graph.root instanceof ChocolaModule);
+    assert.equal(graph.root.id, "page.chjs");
+    assert.equal(graph.entry, "page.chjs");
+    assert.ok(graph.root.isRoot);
 
-test("renderPage is a pure function that writes nothing", async () => {
-  const before = await listDir(path.join(tmpRoot, "dist"));
-  const result = await renderPage(graph);
-  const after = await listDir(path.join(tmpRoot, "dist"));
+    assert.deepEqual([...graph.modules.keys()].sort(), [
+      "lib/greeting.chjs",
+      "page.chjs",
+    ]);
+    assert.ok(!graph.modules.has("lib/unused.chjs"), "unused components stay out");
+    assert.ok(graph.root.deps.has("lib/greeting.chjs"));
+    assert.deepEqual(
+      graph.root.compProps.map((prop) => [prop.name, prop.defaultValue]),
+      [["title", '"Core"']]
+    );
+    assert.equal(graph.root.cssId, deterministicHash("page.chjs", 8));
+  });
 
-  assert.deepEqual(after, before, "renderPage must not touch the output directory");
+  test("raw import statements are preserved for host rewriting", () => {
+    const greetingImport = graph.root.imports.find(
+      (entry) => entry.source === "./lib/greeting.chjs"
+    );
+    assert.ok(greetingImport);
+    assert.equal(
+      greetingImport.raw.trim(),
+      'import Greeting from "./lib/greeting.chjs";'
+    );
+    assert.ok(
+      graph.root.imports.some((entry) => entry.source === "./format.js")
+    );
+  });
 
-  assert.equal(typeof result.html, "string");
-  assert.ok(result.html.length > 0);
-  assert.equal(typeof result.hashMap, "object");
-  assert.ok(Array.isArray(result.files));
-  assert.ok(Array.isArray(result.copies));
-});
+  test("entry is required and must be a .chjs path", async () => {
+    await assert.rejects(
+      () => buildModuleGraph(coreRoot),
+      /entry is required/
+    );
+    await assert.rejects(
+      () => buildModuleGraph(coreRoot, { entry: "page.html" }),
+      /entry must point to a \.chjs component/
+    );
+  });
 
-test("renderPage emits scoped css, runtime chunks and asset descriptors", async () => {
-  const result = await renderPage(graph);
+  test("render is pure and returns fragment, styles, runtime and hashes", async () => {
+    const before = await listDir(coreRoot);
+    const result = await render(graph);
+    const after = await listDir(coreRoot);
 
-  assert.ok(result.files.some((f) => /^sc-[a-z0-9]+\.css$/.test(f.path)), "missing scoped css descriptor");
-  assert.equal(result.files.filter((f) => /^run-[a-z0-9]+\.js$/.test(f.path)).length, 3, "expected three runtime files");
-  assert.ok(result.files.some((f) => /^css-[a-z0-9]+\.css$/.test(f.path)), "missing bundled stylesheet");
-  assert.ok(result.files.some((f) => /^js-[a-z0-9]+\.js$/.test(f.path)), "missing bundled script");
+    assert.deepEqual(after, before, "render must not write files");
+    assert.equal(typeof result.html, "string");
+    assert.match(result.html, /<h1[^>]*>Core<\/h1>/);
+    assert.ok(result.html.includes("Hello World!"));
+    assert.ok(!result.html.includes("<chocolakit:"));
+    assert.equal(typeof result.styles, "string");
+    assert.ok(result.styles.includes(".greeting[data-sc-"));
+    assert.ok(Array.isArray(result.runtime));
+    assert.deepEqual(Object.keys(result.hashMap), [
+      "lib/greeting.chjs",
+      "page.chjs",
+    ]);
+  });
 
-  const copyTargets = result.copies.map((c) => c.to.split(path.sep).pop());
-  assert.ok(copyTargets.includes("favicon.ico"), "missing favicon copy op");
-  assert.ok(copyTargets.includes("static"), "missing static dir copy op");
-});
+  test("render uses ctx overrides and component prop defaults", async () => {
+    const custom = await render(graph, { title: "Ctx", name: "Alice" });
+    assert.match(custom.html, /<h1[^>]*>Ctx<\/h1>/);
+    assert.ok(custom.html.includes("Hello Alice!"));
 
-test("emit writes the full static site to the output directory", async () => {
-  await fs.mkdir(path.join(tmpRoot, "dist"), { recursive: true });
-  await fs.writeFile(path.join(tmpRoot, "dist", "stray.txt"), "stale output");
+    const fallback = await render(graph);
+    assert.match(fallback.html, /<h1[^>]*>Core<\/h1>/);
+    assert.ok(fallback.html.includes("Hello World!"));
+  });
 
-  await emit(graph);
+  test("runtime chunks are ESM with the hydration chunk last", async () => {
+    const result = await render(graph);
+    assert.ok(result.runtime.length >= 3);
 
-  const entries = await fs.readdir(path.join(tmpRoot, "dist"));
-  assert.ok(!entries.includes("stray.txt"), "emptyOutDir should wipe previous output");
-  assert.ok(entries.includes("index.html"));
-  assert.ok(entries.some((f) => /^css-[a-z0-9]+\.css$/.test(f)), "missing bundled css output");
-  assert.ok(entries.some((f) => /^js-[a-z0-9]+\.js$/.test(f)), "missing bundled js output");
-  assert.ok(entries.some((f) => /^sc-[a-z0-9]+\.css$/.test(f)), "missing scoped css output");
-  assert.equal(entries.filter((f) => /^run-[a-z0-9]+\.js$/.test(f)).length, 3, "expected three runtime files");
-  assert.ok(entries.includes("favicon.ico"), "missing copied icon");
+    for (const chunk of result.runtime) {
+      assert.match(chunk.name, /^run-[a-z0-9]+\.js$/);
+      assert.equal(typeof chunk.content, "string");
+    }
 
-  const staticEntries = await fs.readdir(path.join(tmpRoot, "dist", "static"));
-  assert.ok(staticEntries.includes("hello.txt"), "static dir not copied");
+    const hydration = result.runtime.at(-1);
+    assert.ok(hydration.content.includes("DOMContentLoaded"));
+    const hydrationCount = result.runtime.filter((chunk) =>
+      chunk.content.includes("DOMContentLoaded")
+    ).length;
+    assert.equal(hydrationCount, 1, "only the hydration chunk orchestrates mount");
 
-  const hashesPath = path.join(tmpRoot, ".chocola", "hashes.json");
-  const hashes = JSON.parse(await fs.readFile(hashesPath, "utf8"));
-  assert.deepEqual(hashes, {
-    "action.html": deterministicHash("action.html", 8),
-    "greeting.html": deterministicHash("greeting.html", 8),
-    "counter.html": deterministicHash("counter.html", 8),
-    "card.html": deterministicHash("card.html", 8),
+    assert.ok(
+      result.runtime.some((chunk) => chunk.content.includes('import "./format.js";')),
+      "core preserves non-.chjs imports for Kit to rewrite"
+    );
+  });
+
+  test("compile() is buildModuleGraph() + render()", async () => {
+    const direct = await render(
+      await buildModuleGraph(coreRoot, { entry: "page.chjs" })
+    );
+    const combined = await compile(coreRoot, { entry: "page.chjs" });
+    assert.deepEqual(combined, direct);
+  });
+
+  test("hashes and output are deterministic across builds", async () => {
+    const second = await buildModuleGraph(coreRoot, { entry: "page.chjs" });
+    const a = await render(graph);
+    const b = await render(second);
+    assert.equal(b.styles, a.styles);
+    assert.deepEqual(b.hashMap, a.hashMap);
+    assert.deepEqual(
+      b.runtime.map((chunk) => chunk.name),
+      a.runtime.map((chunk) => chunk.name)
+    );
   });
 });
 
-test("emitted html contains interpolated, scoped and slotted content", async () => {
-  const html = await fs.readFile(path.join(tmpRoot, "dist", "index.html"), "utf8");
+describe("compiler — Kit integration", () => {
+  let parent;
+  let root;
+  let state;
 
-  assert.ok(html.includes("Hello World!"), "prop interpolation missing");
-  assert.ok(html.includes("slot content"), "slot projection missing");
-  assert.ok(html.includes("never shown") && html.includes("style=\"display:none\""), "page-level if=false element should be hidden");
-  assert.ok(html.includes(`class="greeting ${deterministicHash("greeting.html", 8)}"`), "scoped css class missing on root");
-});
+  before(async () => {
+    ({ parent, root } = await makeFixtureCopy());
+    state = await buildSiteState(root);
+  });
 
-test("runtime function ids are stable per-module hashes", async () => {
-  const secondGraph = await buildModuleGraph(tmpRoot);
+  after(async () => {
+    if (parent) await fs.rm(parent, { recursive: true, force: true });
+  });
 
-  const namesA = runtimeFunctionNames(await renderPage(graph));
-  const namesB = runtimeFunctionNames(await renderPage(secondGraph));
-  const namesC = runtimeFunctionNames(await renderPage(secondGraph));
+  test("buildSiteState builds one core graph rooted at pages/index.chjs", () => {
+    assert.ok(state.pages.has("/"));
+    const page = state.pages.get("/");
+    assert.ok(page.graph instanceof ModuleGraph);
+    assert.equal(page.graph.root.id, "pages/index.chjs");
+    assert.ok(page.graph.modules.has("lib/greeting.chjs"));
+    assert.ok(page.graph.modules.has("lib/counter.chjs"));
+    assert.ok(page.graph.modules.has("lib/card.chjs"));
+    assert.ok(page.graph.modules.has("lib/action.chjs"));
+    assert.ok(!page.graph.modules.has("lib/unused.chjs"));
+  });
 
-  assert.deepEqual(namesA, namesB, "ids must not depend on traversal order or build");
-  assert.deepEqual(namesB, namesC);
+  test("renderRoute reuses the page graph and assembles core output", async () => {
+    const page = state.pages.get("/");
+    page.graph.__identity = true;
+    const route = await renderRoute(state, "/", {});
+    const raw = await render(page.graph, {});
+    assert.equal(state.pages.get("/").graph, page.graph);
+    assert.equal(state.pages.get("/").graph.__identity, true);
+    assert.ok(route.html.includes(raw.html));
+    assert.equal(route.styles, raw.styles);
+    assert.deepEqual(route.hashMap, raw.hashMap);
+    assert.deepEqual(
+      route.runtime.map((chunk) => chunk.name),
+      raw.runtime.map((chunk) => chunk.name)
+    );
+  });
 
-  assert.ok(namesA.includes("r_" + deterministicHash("counter.html", 8)), "counter runtime id should derive from its filename");
-  assert.ok(namesA.includes("r_" + deterministicHash("action.html", 8)), "action runtime id should derive from its filename");
-});
-
-test("compile() is emit(buildModuleGraph())", async () => {
-  const outDir = path.join(tmpRoot, "dist");
-  await fs.rm(outDir, { recursive: true, force: true });
-
-  await compile(tmpRoot);
-
-  assert.ok((await fs.readdir(outDir)).includes("index.html"), "compile should produce the static site");
+  test("renderRoute calls core per request without rebuilding the graph", async () => {
+    const page = state.pages.get("/");
+    const graph = page.graph;
+    const first = await renderRoute(state, "/", { title: "One" });
+    const second = await renderRoute(state, "/", { title: "Two" });
+    assert.equal(state.pages.get("/").graph, graph);
+    assert.ok(first.html.includes("<title>One</title>"));
+    assert.ok(second.html.includes("<title>Two</title>"));
+    assert.notEqual(first.html, second.html);
+  });
 });

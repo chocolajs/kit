@@ -1,9 +1,9 @@
 <script>
   let a = 1;
   let b = 2;
-  function h1(){ return a; }
-  function h2(){ return b; }
-  function $runtime(){ h2(); }
+  function h1() { return a; }
+  function h2() { return b; }
+  function $runtime() { h2(); }
 </script>
 <template>
   <div>{a} {b}</div>

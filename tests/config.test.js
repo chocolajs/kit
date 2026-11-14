@@ -1,379 +1,446 @@
-import { test, describe, before, after } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { getConfig, isMissingConfigFile, flushConfigWarnings } from "../utils.js";
-
-// Chocola imports
-import { loadConfig } from "chocola/compiler/config.js";
-import { buildModuleGraph } from "chocola/compiler/module-graph.js";
-import compile from "chocola/compiler/index.js";
+import {
+  DEFAULT_CONFIG,
+  loadConfig,
+  resolvePaths,
+} from "../config.js";
+import {
+  getConfig,
+  isMissingConfigFile,
+  flushConfigWarnings,
+} from "../utils.js";
+import compileMultipage from "../routing.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_BASIC = path.join(__dirname, "fixtures", "basic");
 
-function stripAnsi(s) {
-  return s.replace(/\x1b\[[0-9;]*m/g, "");
+function stripAnsi(value) {
+  return String(value).replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 async function captureWarnings(rootDir, fn) {
   const warns = [];
-  const origWarn = console.warn;
+  const original = console.warn;
   console.warn = (...args) => warns.push(stripAnsi(args.join(" ")));
   try {
     await fn();
     flushConfigWarnings(rootDir);
   } finally {
-    console.warn = origWarn;
-    // ensure buffer cleared even if test failed
+    console.warn = original;
     flushConfigWarnings(rootDir);
   }
   return warns;
 }
 
-async function captureLogs(rootDir, fn) {
-  const logs = [];
-  const warns = [];
-  const origLog = console.log;
-  const origWarn = console.warn;
-  console.log = (...args) => logs.push(stripAnsi(args.join(" ")));
-  console.warn = (...args) => warns.push(stripAnsi(args.join(" ")));
-  try {
-    await fn();
-  } finally {
-    console.log = origLog;
-    console.warn = origWarn;
-    flushConfigWarnings(rootDir);
+async function makeRoot(prefix = "chocola-config-", config = null) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  await fs.mkdir(path.join(root, "src"), { recursive: true });
+  if (config !== null) {
+    await fs.writeFile(
+      path.join(root, "chocola.config.json"),
+      JSON.stringify(config, null, 2)
+    );
   }
-  return { logs, warns };
+  return root;
 }
 
+async function listDir(dir) {
+  try {
+    return (await fs.readdir(dir)).sort();
+  } catch {
+    return [];
+  }
+}
+
+describe("config — defaults", () => {
+  test("DEFAULT_CONFIG exposes frozen bundle, dev and server defaults", () => {
+    assert.ok(Object.isFrozen(DEFAULT_CONFIG));
+    assert.deepEqual(DEFAULT_CONFIG.bundle, {
+      srcDir: "src",
+      outDir: "dist",
+      pagesDir: "pages",
+      appFile: "app.html",
+      staticDir: "static",
+      emptyOutDir: true,
+      treeShakeRuntime: true,
+    });
+    assert.deepEqual(DEFAULT_CONFIG.dev, { hostname: "localhost", port: 3000 });
+    assert.deepEqual(DEFAULT_CONFIG.server, {
+      hostname: "localhost",
+      port: 8080,
+      middleware: null,
+    });
+  });
+
+  test("resolvePaths resolves every directory against the project root", () => {
+    const root = path.resolve("example-root");
+    const defaults = resolvePaths(root);
+    assert.deepEqual(defaults, {
+      rootDir: root,
+      srcDir: path.join(root, "src"),
+      outDir: path.join(root, "dist"),
+      pagesDir: path.join(root, "src", "pages"),
+      appFile: path.join(root, "src", "app.html"),
+      staticDir: path.join(root, "src", "static"),
+    });
+
+    const custom = resolvePaths(root, {
+      srcDir: "app",
+      outDir: "public",
+      pagesDir: "routes",
+      appFile: "shell.html",
+      staticDir: "assets",
+    });
+    assert.equal(custom.srcDir, path.join(root, "app"));
+    assert.equal(custom.outDir, path.join(root, "public"));
+    assert.equal(custom.pagesDir, path.join(root, "app", "routes"));
+    assert.equal(custom.appFile, path.join(root, "app", "shell.html"));
+    assert.equal(custom.staticDir, path.join(root, "app", "assets"));
+  });
+});
+
 describe("config — zero-config (no chocola.config.json)", () => {
-  test("getConfig returns flagged empty and queues top-level warning", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-cfg-missing-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    const warns = await captureWarnings(tmp, async () => {
-      const cfg = await getConfig(tmp);
-      assert.ok(isMissingConfigFile(cfg), "should be flagged missing");
-      assert.deepEqual(Object.keys(cfg).filter(k => !k.startsWith("__")), [], "empty object");
-    });
-    assert.ok(warns.some(w => w.includes("chocola.config.json not found")), `expected top-level warning, got ${warns}`);
-    // second call should not re-queue due to dedup
-    const warns2 = await captureWarnings(tmp, async () => {
-      await getConfig(tmp);
-    });
-    assert.equal(warns2.length, 0, "deduped top-level warning");
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("loadConfig returns defaults without throwing", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-cfg-load-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    const cfg = await loadConfig(tmp);
-    assert.equal(cfg.srcDir, "src");
-    assert.equal(cfg.outDir, "dist");
-    assert.equal(cfg.libDir, "lib");
-    assert.equal(cfg.emptyOutDir, true);
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("buildModuleGraph and compile work completely config-less (zero-config promise)", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-zero-graph-"));
-    await fs.cp(path.join(FIXTURE_BASIC, "src"), path.join(tmp, "src"), { recursive: true });
-    // no chocola.config.json
-    let graph;
-    const warns = await captureWarnings(tmp, async () => {
-      graph = await buildModuleGraph(tmp);
-    });
-    // buildModuleGraph internally calls loadConfig/getConfig, so top-level warning queued
-    // flush happens via capture helper, so we can assert
-    assert.ok(graph);
-    assert.equal(graph.page.id, "index.html");
-    // compile should not throw and should produce dist
-    await captureWarnings(tmp, async () => {
-      await compile(tmp);
-    });
-    const out = await fs.readdir(path.join(tmp, "dist"));
-    assert.ok(out.includes("index.html"), "compile should produce output even without config");
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("dev server does not crash when dev config missing (original bug)", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-zero-dev-"));
-    await fs.cp(FIXTURE_BASIC, tmp, { recursive: true });
-    // FIXTURE_BASIC has bundle only, no dev block
-    const full = await getConfig(tmp);
-    assert.ok(!isMissingConfigFile(full), "fixture has file, not missing");
-    assert.equal(full.dev, undefined, "dev block should be missing");
-    // dev logic should not throw TypeError
-    let threw = false;
+  test("getConfig flags a missing file and queues one top-level warning", async () => {
+    const root = await makeRoot("chocola-cfg-missing-");
     try {
-      const { isMissingConfigFile: isMissing } = await import("../utils.js");
-      if (isMissing(full)) throw new Error("unexpected missing");
-      if (full.dev == null) {
-        // this is the fixed path: should warn block, not access hostname
-      } else {
-        // would have thrown before fix: devConfig.hostname access on undefined
-        const devConfig = full.dev || {};
-        void devConfig.hostname;
-        void devConfig.port;
-      }
-    } catch (e) {
-      threw = true;
-    }
-    assert.equal(threw, false, "dev handling should not throw when dev missing");
+      let raw;
+      const warns = await captureWarnings(root, async () => {
+        raw = await getConfig(root);
+      });
+      assert.ok(isMissingConfigFile(raw));
+      assert.deepEqual(
+        Object.keys(raw).filter((key) => !key.startsWith("__")),
+        []
+      );
+      assert.equal(
+        warns.filter((warning) => warning.includes("chocola.config.json not found")).length,
+        1
+      );
 
-    // also test completely missing file
-    const tmp2 = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-zero-dev2-"));
-    await fs.mkdir(path.join(tmp2, "src", "lib"), { recursive: true });
-    await fs.writeFile(path.join(tmp2, "src", "index.html"), "<html><body><app></app></body></html>");
-    const full2 = await getConfig(tmp2);
-    assert.ok(isMissingConfigFile(full2));
-    assert.doesNotThrow(() => {
-      const dc = full2.dev || {};
-      void dc.hostname;
-      void dc.port;
-    });
-    await fs.rm(tmp, { recursive: true, force: true });
-    await fs.rm(tmp2, { recursive: true, force: true });
-  });
-});
-
-describe("config — hierarchical warnings", () => {
-  test("empty {} config warns bundle, dev, server blocks", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-hier-empty-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({}));
-    const warns = await captureWarnings(tmp, async () => {
-      await getConfig(tmp);
-      await loadConfig(tmp);
-      const full = await getConfig(tmp);
-      // dev/server field warnings are handled in dev/server modules, but block warnings are central
-      // For this test we just check block warnings via getConfig
-    });
-    assert.ok(warns.some(w => w.includes("bundle config not defined")), `bundle block, got ${warns}`);
-    assert.ok(warns.some(w => w.includes("dev config not defined")), `dev block, got ${warns}`);
-    assert.ok(warns.some(w => w.includes("server config not defined")), `server block, got ${warns}`);
-    assert.ok(!warns.some(w => w.includes("not found")), "should not have top-level when file exists");
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("bundle partial: loadConfig returns default libDir without warnings", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-hier-partial-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({ bundle: { srcDir: "src", outDir: "dist" } }));
-    const cfg = await loadConfig(tmp);
-    assert.equal(cfg.srcDir, "src");
-    assert.equal(cfg.outDir, "dist");
-    assert.equal(cfg.libDir, "lib", "loadConfig should return default libDir");
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("dev empty block warns fields, not block", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-hier-devempty-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({
-      bundle: { srcDir: "src", outDir: "dist", libDir: "lib" },
-      dev: {},
-      server: { hostname: "localhost", port: 8080 }
-    }));
-    const warns = await captureWarnings(tmp, async () => {
-      const full = await getConfig(tmp);
-      await loadConfig(tmp);
-      // simulate dev field warnings as dev/index.js does
-      if (!isMissingConfigFile(full) && full.dev != null) {
-        const dc = full.dev;
-        if (dc.hostname == null) {
-          const chalk = (await import("chocola/compiler/chalk.js")).default;
-          const { queueConfigWarning } = await import("../utils.js");
-          queueConfigWarning(tmp, chalk.bold.yellow("WARNING!"), `dev.hostname not defined in chocola.config.json file: using default localhost dev.hostname.`);
-        }
-        if (dc.port == null) {
-          const chalk = (await import("chocola/compiler/chalk.js")).default;
-          const { queueConfigWarning } = await import("../utils.js");
-          queueConfigWarning(tmp, chalk.bold.yellow("WARNING!"), `dev.port not defined in chocola.config.json file: using default 3000 dev.port.`);
-        }
-      }
-    });
-    assert.ok(warns.some(w => w.includes("dev.hostname")), `dev.hostname field, got ${warns}`);
-    assert.ok(warns.some(w => w.includes("dev.port")), `dev.port field, got ${warns}`);
-    assert.ok(!warns.some(w => w.includes("dev config not defined")), "dev block exists, should not warn block");
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("dev partial hostname only warns dev.port", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-hier-devpartial-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({
-      bundle: { srcDir: "src", outDir: "dist", libDir: "lib" },
-      dev: { hostname: "example.com" },
-      server: { hostname: "localhost", port: 8080 }
-    }));
-    const warns = await captureWarnings(tmp, async () => {
-      const full = await getConfig(tmp);
-      if (!isMissingConfigFile(full) && full.dev != null) {
-        const dc = full.dev;
-        if (dc.hostname == null) {
-          const chalk = (await import("chocola/compiler/chalk.js")).default;
-          const { queueConfigWarning } = await import("../utils.js");
-          queueConfigWarning(tmp, chalk.bold.yellow("WARNING!"), `dev.hostname missing`);
-        }
-        if (dc.port == null) {
-          const chalk = (await import("chocola/compiler/chalk.js")).default;
-          const { queueConfigWarning } = await import("../utils.js");
-          queueConfigWarning(tmp, chalk.bold.yellow("WARNING!"), `dev.port not defined in chocola.config.json file: using default 3000 dev.port.`);
-        }
-      }
-    });
-    assert.ok(!warns.some(w => w.includes("dev.hostname")), `should not warn hostname when present, got ${warns}`);
-    assert.ok(warns.some(w => w.includes("dev.port")), `dev.port missing, got ${warns}`);
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("server partial hostname only warns server.port with prefix", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-hier-srvpartial-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({
-      bundle: { srcDir: "src", outDir: "dist", libDir: "lib" },
-      dev: { hostname: "localhost", port: 3000 },
-      server: { hostname: "127.0.0.1" }
-    }));
-    const warns = await captureWarnings(tmp, async () => {
-      const full = await getConfig(tmp);
-      const sc = full.server || {};
-      if (!isMissingConfigFile(full) && full.server != null) {
-        if (sc.port == null) {
-          const chalk = (await import("chocola/compiler/chalk.js")).default;
-          const { queueConfigWarning } = await import("../utils.js");
-          queueConfigWarning(tmp, chalk.bold.yellow("WARNING!"), `server.port not defined in chocola.config.json file: using default 8080 server.port.`);
-        }
-      }
-    });
-    assert.ok(warns.some(w => w.includes("server.port")), `server.port, got ${warns}`);
-    assert.ok(!warns.some(w => w.includes("server.hostname")), `hostname present, got ${warns}`);
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("no config file only top-level, no per-block", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-hier-nofile-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    const warns = await captureWarnings(tmp, async () => {
-      await getConfig(tmp);
-      await loadConfig(tmp);
-    });
-    assert.ok(warns.some(w => w.includes("not found")), `top-level, got ${warns}`);
-    assert.ok(!warns.some(w => w.includes("bundle config") || w.includes("dev config") || w.includes("server config")), `no per-block when file missing, got ${warns}`);
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-});
-
-describe("config — warning full paths (bundle.* dev.* server.*)", () => {
-  test("lacking dev.port logs as dev.port not port", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-prefix-dev-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({
-      bundle: { srcDir: "src", outDir: "dist", libDir: "lib" },
-      dev: { hostname: "localhost" },
-      server: { hostname: "localhost", port: 8080 }
-    }));
-    const warns = await captureWarnings(tmp, async () => {
-      const full = await getConfig(tmp);
-      if (!isMissingConfigFile(full) && full.dev != null && full.dev.port == null) {
-        const chalk = (await import("chocola/compiler/chalk.js")).default;
-        const { queueConfigWarning } = await import("../utils.js");
-        queueConfigWarning(tmp, chalk.bold.yellow("WARNING!"), `dev.port not defined in chocola.config.json file: using default 3000 dev.port.`);
-      }
-    });
-    const portWarn = warns.find(w => w.includes("port not defined"));
-    assert.ok(portWarn, "should have port warning");
-    assert.match(portWarn, /dev\.port/, `should log as dev.port, got ${portWarn}`);
-    assert.ok(!portWarn.match(/(^| )port not defined/) || portWarn.includes("dev.port"), "should not log generic port without prefix");
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("bundle field warnings: loadConfig returns defaults without field warnings", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-prefix-bundle-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({ bundle: { srcDir: "src" } }));
-    const cfg = await loadConfig(tmp);
-    assert.equal(cfg.srcDir, "src");
-    assert.equal(cfg.outDir, "dist", "loadConfig should return default outDir");
-    assert.equal(cfg.libDir, "lib", "loadConfig should return default libDir");
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-
-  test("server field warnings use server.* prefix", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-prefix-server-"));
-    await fs.mkdir(path.join(tmp, "src"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({
-      bundle: { srcDir: "src", outDir: "dist", libDir: "lib" },
-      dev: { hostname: "localhost", port: 3000 },
-      server: {}
-    }));
-    const warns = await captureWarnings(tmp, async () => {
-      const full = await getConfig(tmp);
-      const sc = full.server || {};
-      if (sc.port == null) {
-        const chalk = (await import("chocola/compiler/chalk.js")).default;
-        const { queueConfigWarning } = await import("../utils.js");
-        queueConfigWarning(tmp, chalk.bold.yellow("WARNING!"), `server.port not defined in chocola.config.json file: using default 8080 server.port.`);
-      }
-      if (sc.hostname == null) {
-        const chalk = (await import("chocola/compiler/chalk.js")).default;
-        const { queueConfigWarning } = await import("../utils.js");
-        queueConfigWarning(tmp, chalk.bold.yellow("WARNING!"), `server.hostname not defined in chocola.config.json file: using default localhost server.hostname.`);
-      }
-    });
-    assert.ok(warns.some(w => w.includes("server.port")), `server.port, got ${warns}`);
-    assert.ok(warns.some(w => w.includes("server.hostname")), `server.hostname, got ${warns}`);
-    await fs.rm(tmp, { recursive: true, force: true });
-  });
-});
-
-describe("config — flushConfigWarnings", () => {
-  test("flushConfigWarnings flushes queued warnings", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-flush-"));
-    await fs.mkdir(path.join(tmp, "src", "lib"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "src", "index.html"), "<html><body><app></app></body></html>");
-    await fs.writeFile(path.join(tmp, "src", "lib", "Comp.html"), "<template><div>c</div></template>");
-    const warns = [];
-    const origWarn = console.warn;
-    console.warn = (...args) => warns.push(stripAnsi(args.join(" ")));
-    try {
-      await getConfig(tmp);
-      await getConfig(tmp); // second call should dedup
-      flushConfigWarnings(tmp);
+      const again = await captureWarnings(root, async () => {
+        await getConfig(root);
+      });
+      assert.equal(again.length, 0, "top-level warning is deduped per root");
     } finally {
-      console.warn = origWarn;
-      flushConfigWarnings(tmp);
+      await fs.rm(root, { recursive: true, force: true });
     }
-    assert.ok(warns.some(w => w.includes("chocola.config.json not found")), `expected top-level warning, got ${warns.join(" ")}`);
-    await fs.rm(tmp, { recursive: true, force: true });
   });
 
-  test("full config produces no warnings", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-full-ok-"));
-    await fs.mkdir(path.join(tmp, "src", "lib"), { recursive: true });
-    await fs.writeFile(path.join(tmp, "src", "index.html"), "<html><body><app></app></body></html>");
-    await fs.writeFile(path.join(tmp, "src", "lib", "A.html"), "<template><div>a</div></template>");
-    await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({
-      bundle: { srcDir: "src", outDir: "dist", libDir: "lib" },
-      dev: { hostname: "localhost", port: 3000 },
-      server: { hostname: "localhost", port: 8080 }
-    }));
-    const warns = await captureWarnings(tmp, async () => {
-      await getConfig(tmp);
-      await loadConfig(tmp);
-      const full = await getConfig(tmp);
-      // dev/server fields present, so no warnings
-      if (!isMissingConfigFile(full) && full.dev != null) {
-        // would warn if missing, but not here
-      }
+  test("loadConfig returns Kit defaults and absolute paths", async () => {
+    const root = await makeRoot("chocola-cfg-defaults-");
+    try {
+      const { config, paths, raw } = await loadConfig(root, { silent: true });
+      assert.ok(isMissingConfigFile(raw));
+      assert.equal(config.srcDir, path.join(root, "src"));
+      assert.equal(config.outDir, path.join(root, "dist"));
+      assert.equal(config.pagesDir, path.join(root, "src", "pages"));
+      assert.equal(config.appFile, path.join(root, "src", "app.html"));
+      assert.equal(config.staticDir, path.join(root, "src", "static"));
+      assert.equal(config.emptyOutDir, true);
+      assert.equal(config.treeShakeRuntime, true);
+      assert.deepEqual(config.dev, { hostname: "localhost", port: 3000 });
+      assert.deepEqual(config.server, {
+        hostname: "localhost",
+        port: 8080,
+        middleware: null,
+      });
+      assert.deepEqual(paths, resolvePaths(root, config));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a zero-config site builds to dist with Kit defaults", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-cfg-build-"));
+    try {
+      await fs.cp(path.join(FIXTURE_BASIC, "src"), path.join(root, "src"), {
+        recursive: true,
+      });
+      await assert.rejects(
+        () => fs.stat(path.join(root, "chocola.config.json")),
+        /ENOENT/
+      );
+
+      const emitted = await compileMultipage(root);
+
+      assert.ok(
+        emitted.files.some((file) => /^sc-[a-z0-9]+\.css$/.test(file.path))
+      );
+      assert.ok(
+        emitted.files.some((file) => /^run-[a-z0-9]+\.js$/.test(file.path))
+      );
+
+      const outDir = path.join(root, "dist");
+      const out = await listDir(outDir);
+      assert.ok(out.includes("index.html"));
+      assert.ok(out.includes("styles.css"));
+      assert.ok(out.includes("static"));
+
+      const hashes = JSON.parse(
+        await fs.readFile(path.join(root, ".chocola", "hashes.json"), "utf-8")
+      );
+      assert.deepEqual(Object.keys(hashes), [
+        "lib/action.chjs",
+        "lib/card.chjs",
+        "lib/counter.chjs",
+        "lib/greeting.chjs",
+        "pages/index.chjs",
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("config — warning hierarchy", () => {
+  test("an existing empty config warns bundle, dev and server blocks", async () => {
+    const root = await makeRoot("chocola-cfg-empty-", {});
+    try {
+      const warns = await captureWarnings(root, async () => {
+        await loadConfig(root);
+      });
+      assert.ok(warns.some((warning) => warning.includes("bundle config not defined")));
+      assert.ok(warns.some((warning) => warning.includes("dev config not defined")));
+      assert.ok(warns.some((warning) => warning.includes("server config not defined")));
+      assert.ok(!warns.some((warning) => warning.includes("not found")));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a bundle-only config warns dev and server but not bundle", async () => {
+    const root = await makeRoot("chocola-cfg-bundle-", {
+      bundle: { srcDir: "src", outDir: "dist" },
     });
-    assert.equal(warns.length, 0, `full config should produce no warnings, got ${warns}`);
-    await fs.rm(tmp, { recursive: true, force: true });
+    try {
+      const warns = await captureWarnings(root, async () => {
+        await loadConfig(root);
+      });
+      assert.ok(!warns.some((warning) => warning.includes("bundle config not defined")));
+      assert.ok(warns.some((warning) => warning.includes("dev config not defined")));
+      assert.ok(warns.some((warning) => warning.includes("server config not defined")));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing config file warns only at the top level", async () => {
+    const root = await makeRoot("chocola-cfg-nofile-");
+    try {
+      const warns = await captureWarnings(root, async () => {
+        await getConfig(root);
+        await loadConfig(root);
+      });
+      assert.ok(warns.some((warning) => warning.includes("not found")));
+      assert.ok(
+        !warns.some(
+          (warning) =>
+            warning.includes("bundle config") ||
+            warning.includes("dev config") ||
+            warning.includes("server config")
+        )
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("silent mode suppresses queued warnings", async () => {
+    const root = await makeRoot("chocola-cfg-silent-", {});
+    try {
+      const warns = await captureWarnings(root, async () => {
+        await loadConfig(root, { silent: true });
+      });
+      assert.deepEqual(warns, []);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("libDir warns once and is removed from the resolved config", async () => {
+    const root = await makeRoot("chocola-cfg-libdir-", {
+      bundle: { srcDir: "src", outDir: "dist" },
+      libDir: "components",
+    });
+    try {
+      const warns = await captureWarnings(root, async () => {
+        const { config } = await loadConfig(root);
+        assert.equal(config.libDir, undefined);
+        await loadConfig(root);
+      });
+      assert.equal(
+        warns.filter((warning) => warning.includes("libDir is deprecated")).length,
+        1
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("bundle.libDir also warns and drops libDir", async () => {
+    const root = await makeRoot("chocola-cfg-libdir-bundle-", {
+      bundle: { srcDir: "src", outDir: "dist", libDir: "components" },
+    });
+    try {
+      const warns = await captureWarnings(root, async () => {
+        const { config } = await loadConfig(root);
+        assert.equal(config.libDir, undefined);
+      });
+      assert.ok(warns.some((warning) => warning.includes("libDir is deprecated")));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("config — loading and precedence", () => {
+  test("config values merge over defaults and resolve against the root", async () => {
+    const root = await makeRoot("chocola-cfg-merge-", {
+      bundle: {
+        srcDir: "app",
+        outDir: "public",
+        pagesDir: "routes",
+        appFile: "shell.html",
+        staticDir: "assets",
+        emptyOutDir: false,
+      },
+      dev: { port: 4000 },
+      server: { hostname: "0.0.0.0", port: 9000 },
+    });
+    try {
+      const { config } = await loadConfig(root, { silent: true });
+      assert.equal(config.srcDir, path.join(root, "app"));
+      assert.equal(config.outDir, path.join(root, "public"));
+      assert.equal(config.pagesDir, path.join(root, "app", "routes"));
+      assert.equal(config.appFile, path.join(root, "app", "shell.html"));
+      assert.equal(config.staticDir, path.join(root, "app", "assets"));
+      assert.equal(config.emptyOutDir, false);
+      assert.equal(config.treeShakeRuntime, true);
+      assert.deepEqual(config.dev, { hostname: "localhost", port: 4000 });
+      assert.deepEqual(config.server, {
+        hostname: "0.0.0.0",
+        port: 9000,
+        middleware: null,
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("build is accepted as an alias for bundle", async () => {
+    const root = await makeRoot("chocola-cfg-buildalias-", {
+      build: { srcDir: "app", outDir: "public" },
+    });
+    try {
+      const { config } = await loadConfig(root, { silent: true });
+      assert.equal(config.srcDir, path.join(root, "app"));
+      assert.equal(config.outDir, path.join(root, "public"));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("CLI overrides win over the config file for every bundle key", async () => {
+    const root = await makeRoot("chocola-cfg-overrides-", {
+      bundle: {
+        srcDir: "src",
+        outDir: "dist",
+        pagesDir: "pages",
+        appFile: "app.html",
+        staticDir: "static",
+        emptyOutDir: true,
+      },
+      dev: { hostname: "config-host", port: 4000 },
+      server: { hostname: "config-server", port: 9000, middleware: "mw.js" },
+    });
+    try {
+      const { config } = await loadConfig(root, {
+        silent: true,
+        overrides: {
+          srcDir: "app",
+          outDir: "public",
+          pagesDir: "routes",
+          appFile: "shell.html",
+          staticDir: "assets",
+          emptyOutDir: false,
+          dev: { port: 4100 },
+          server: { hostname: "override-server" },
+        },
+      });
+
+      assert.equal(config.srcDir, path.join(root, "app"));
+      assert.equal(config.outDir, path.join(root, "public"));
+      assert.equal(config.pagesDir, path.join(root, "app", "routes"));
+      assert.equal(config.appFile, path.join(root, "app", "shell.html"));
+      assert.equal(config.staticDir, path.join(root, "app", "assets"));
+      assert.equal(config.emptyOutDir, false);
+      assert.equal(config.dev.port, 4100);
+      assert.equal(config.dev.hostname, "config-host");
+      assert.equal(config.server.hostname, "override-server");
+      assert.equal(config.server.port, 9000);
+      assert.equal(config.server.middleware, "mw.js");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("nested overrides.bundle and overrides.build are honored", async () => {
+    const root = await makeRoot("chocola-cfg-nested-", {});
+    try {
+      const viaBundle = await loadConfig(root, {
+        silent: true,
+        overrides: { bundle: { outDir: "out-bundle" } },
+      });
+      assert.equal(viaBundle.config.outDir, path.join(root, "out-bundle"));
+
+      const viaBuild = await loadConfig(root, {
+        silent: true,
+        overrides: { build: { outDir: "out-build" } },
+      });
+      assert.equal(viaBuild.config.outDir, path.join(root, "out-build"));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("customPath loads an alternate config file relative to the root", async () => {
+    const root = await makeRoot("chocola-cfg-custom-", {
+      bundle: { srcDir: "src", outDir: "dist" },
+    });
+    try {
+      await fs.writeFile(
+        path.join(root, "alt.json"),
+        JSON.stringify({ bundle: { outDir: "alt_out" } })
+      );
+      const { config, paths, raw } = await loadConfig(root, {
+        silent: true,
+        customPath: "alt.json",
+      });
+      assert.equal(raw.outDir, undefined);
+      assert.equal(config.outDir, path.join(root, "alt_out"));
+      assert.equal(config.srcDir, path.join(root, "src"));
+      assert.equal(paths.outDir, path.join(root, "alt_out"));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("unknown top-level keys are preserved for consumers", async () => {
+    const root = await makeRoot("chocola-cfg-extras-", {
+      bundle: { srcDir: "src", outDir: "dist" },
+      siteName: "Chocola",
+    });
+    try {
+      const { config } = await loadConfig(root, { silent: true });
+      assert.equal(config.siteName, "Chocola");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
