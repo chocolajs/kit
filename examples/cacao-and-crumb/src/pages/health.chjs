@@ -1,0 +1,11 @@
+<script>
+  export let title = "Service status — Cacao & Crumb";
+</script>
+<template>
+  <main class="page shell">
+    <h1>Service status</h1>
+    <p>The storefront is running. This route exists for uptime checks and deploys.</p>
+    <p class="muted">Checked at build/render time.</p>
+  </main>
+</template>
+<!-- probe-comment -->

@@ -1,0 +1,57 @@
+<script>
+  import Money from "../../lib/money.chjs";
+  import AddToCart from "../../lib/add-to-cart.chjs";
+
+  export let title = "Milk & Sea Salt — Cacao & Crumb";
+  export let description =
+    "Forty-five percent milk chocolate finished with fleur de sel from Guérande. Caramel, sea salt, toasted milk.";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/shop/milk-sea-salt" />
+  <meta property="og:type" content="product" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+  <meta property="og:image" content="https://cacaoandcrumb.example/assets/milk-sea-salt.svg" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="breadcrumbs"><a href="/shop">Shop</a> / Milk &amp; Sea Salt</p>
+    <article class="product-detail">
+      <div class="product-detail__media">
+        <img src="/assets/milk-sea-salt.svg" alt="Milk and sea salt chocolate bar" width="300" height="225" />
+      </div>
+      <div>
+        <h1>Milk &amp; Sea Salt</h1>
+        <p class="lead">
+          Forty-five percent milk chocolate finished with fleur de sel harvested in
+          Guérande. Sweet, saline, impossible to share.
+        </p>
+        <p class="product-detail__price"><Money cents="1100"></Money></p>
+        <div class="button-row">
+          <AddToCart slug="milk-sea-salt" label="Add to cart"></AddToCart>
+          <a class="btn btn--ghost" href="/cart">View cart</a>
+        </div>
+        <dl class="spec-list">
+          <dt>Origin</dt><dd>Piura, Peru</dd>
+          <dt>Tasting notes</dt><dd>Caramel, fleur de sel, toasted milk</dd>
+          <dt>Ingredients</dt><dd>Cacao beans, cane sugar, cocoa butter, whole milk powder, sea salt.</dd>
+          <dt>Weight</dt><dd>60 g (2.1 oz)</dd>
+          <dt>Dietary</dt><dd>Contains milk; gluten-free, soy-free</dd>
+        </dl>
+        <p class="muted">
+          Ships within two business days. Free shipping on orders over $35.
+        </p>
+      </div>
+    </article>
+
+    <section class="section">
+      <h2>Pairs well with</h2>
+      <ul class="button-row" style="list-style: none; padding: 0;">
+        <li><a href="/shop/70-dark">70% Dark</a></li>
+        <li><a href="/shop/hazelnut-praline">Hazelnut Praline</a></li>
+      </ul>
+    </section>
+  </main>
+</template>

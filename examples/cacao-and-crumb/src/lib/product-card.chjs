@@ -1,0 +1,98 @@
+<script>
+  import AddToCart from "./add-to-cart.chjs";
+  import Money from "./money.chjs";
+
+  export let slug = "";
+  export let name = "";
+  export let price = 0;
+  export let note = "";
+  export let art = "";
+  export let tags = "";
+</script>
+<template>
+  <article class="product-card" data-product-card data-search="{name} {note} {tags}">
+    <div class="product-card__media">
+      <img src="{art}" alt="" width="220" height="160" loading="lazy" />
+    </div>
+    <div class="product-card__body">
+      <h3 class="product-card__name">
+        <a href="/shop/{slug}">{name}</a>
+      </h3>
+      <p class="product-card__note">{note}</p>
+      <div class="product-card__meta">
+        <span class="price"><Money cents="{price}"></Money></span>
+        <AddToCart slug="{slug}"></AddToCart>
+      </div>
+    </div>
+  </article>
+</template>
+<style>
+  .product-card {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background: #fffdf9;
+    border: 1px solid #e2d2c0;
+    border-radius: 18px;
+    overflow: hidden;
+  }
+
+  .product-card[hidden] {
+    display: none;
+  }
+
+  .product-card__media {
+    display: grid;
+    place-items: center;
+    aspect-ratio: 4 / 3;
+    padding: 1.25rem;
+    background: #f3e9dc;
+  }
+
+  .product-card__media img {
+    width: min(180px, 100%);
+  }
+
+  .product-card__body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 1.1rem 1.15rem 1.25rem;
+  }
+
+  .product-card__name {
+    margin: 0;
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-size: 1.2rem;
+  }
+
+  .product-card__name a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .product-card__name a:hover {
+    text-decoration: underline;
+  }
+
+  .product-card__note {
+    margin: 0;
+    color: #5c463a;
+    font-size: 0.92rem;
+  }
+
+  .product-card__meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: auto;
+    padding-top: 0.75rem;
+  }
+
+  .price {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+</style>

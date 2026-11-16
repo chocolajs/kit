@@ -1,0 +1,15 @@
+Cacao & Crumb — wholesale sheet (sample)
+
+Bars, 60 g, wrapped and batch-stamped
+  70% Dark .............. $5.40 each / case of 24 ($129.60)
+  Milk & Sea Salt ....... $6.60 each / case of 24 ($158.40)
+  Hazelnut Praline ...... $7.20 each / case of 24 ($172.80)
+  Citrus Nib ............ $6.00 each / case of 24 ($144.00)
+
+Minimum first order: two cases.
+Lead time: 10 business days.
+Shelf life: 9 months from batch date.
+Storage: 16–18°C, dry, away from strong odors.
+
+Orders: wholesale@cacaoandcrumb.example
+This file is served from /static/wholesale-sheet.txt.

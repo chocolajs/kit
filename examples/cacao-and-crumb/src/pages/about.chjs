@@ -1,0 +1,129 @@
+<script>
+  export let title = "About — Cacao & Crumb";
+  export let description =
+    "A small bean-to-bar chocolate workshop in Portland, Oregon. Four origins, one stone grinder, and a very loud roaster.";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/about" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="eyebrow">Since 2019</p>
+    <h1>A workshop, not a factory</h1>
+    <p class="lead">
+      Cacao &amp; Crumb started with a borrowed melanger and a sack of Ecuadorian
+      beans. Six years later we still make every bar in the same room.
+    </p>
+
+    <article class="prose">
+      <h2>The short version</h2>
+      <p>
+        We are three people: a chocolate maker, a roaster, and whoever is answering
+        email that day. We buy cacao directly from four farms, roast in small lots, and
+        grind for two days. The bars are tempered, molded, wrapped, and stamped by hand.
+      </p>
+      <p>
+        We do not use emulsifiers, vanilla flavoring, or "natural flavors." If a bar
+        tastes like cherry, that is because the bean tastes like cherry.
+      </p>
+
+      <h2>What we care about</h2>
+      <ul>
+        <li>
+          <strong>Paying for the work.</strong> We publish what we pay per kilo and
+          buy at least two tonnes per origin each year.
+        </li>
+        <li>
+          <strong>Less packaging.</strong> Compostable wrappers, paper tape, and no
+          plastic inserts. The box is the shipping box.
+        </li>
+        <li>
+          <strong>Telling the truth about batch size.</strong> When we run out, we say
+          so rather than blending in beans from elsewhere.
+        </li>
+      </ul>
+    </article>
+
+    <section class="section">
+      <h2>The people</h2>
+      <ul class="team">
+        <li>
+          <span class="team__mark" aria-hidden="true">MR</span>
+          <h3>Mara Reyes</h3>
+          <p>Chocolate maker. Runs the grinders and the tempering bench.</p>
+        </li>
+        <li>
+          <span class="team__mark" aria-hidden="true">JT</span>
+          <h3>Jonah Tate</h3>
+          <p>Roaster and buyer. Spends a suspicious amount of time cupping.</p>
+        </li>
+        <li>
+          <span class="team__mark" aria-hidden="true">SL</span>
+          <h3>Sam Liu</h3>
+          <p>Wrapping, shipping, and the person who answers your email.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section class="section">
+      <h2>Visit</h2>
+      <p>
+        214 SE Ash Street, Portland, OR 97214. The shop counter is open Thursday to
+        Sunday, 10am to 5pm. Tastings run Saturdays at 11am and 2pm; they last about
+        forty minutes and include six bars.
+      </p>
+      <p class="muted">
+        The tasting room is up one flight of stairs. Call ahead and we will set up the
+        ground-floor table instead.
+      </p>
+      <p><a class="btn" href="/contact">Book a tasting</a></p>
+    </section>
+  </main>
+</template>
+<style>
+  .team {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1.5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .team li {
+    padding: 1.25rem;
+    border: 1px solid #e2d2c0;
+    border-radius: 18px;
+    background: #fffdf9;
+  }
+
+  .team__mark {
+    display: grid;
+    place-items: center;
+    width: 2.6rem;
+    height: 2.6rem;
+    margin-bottom: 0.75rem;
+    border-radius: 50%;
+    background: #2b1a12;
+    color: #fbf6ef;
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-size: 0.9rem;
+    letter-spacing: 0.05em;
+  }
+
+  .team h3 {
+    margin: 0 0 0.25rem;
+    font-size: 1.05rem;
+  }
+
+  .team p {
+    margin: 0;
+    color: #5c463a;
+    font-size: 0.92rem;
+  }
+</style>

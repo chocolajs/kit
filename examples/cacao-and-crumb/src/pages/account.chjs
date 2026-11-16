@@ -1,0 +1,90 @@
+<script>
+  export let title = "Account — Cacao & Crumb";
+  export let signedIn = false;
+  export let name = "";
+  export let email = "";
+  export let lastOrder = "";
+  export let saved = "";
+  export let signedOut = "";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="robots" content="noindex" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/account" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="eyebrow">Your details</p>
+    <h1>Account</h1>
+
+    <p class="banner" if="{saved === '1'}">Details saved on this device.</p>
+    <p class="banner" if="{signedOut === '1'}">Details removed from this device.</p>
+
+    <p class="lead" if="{signedIn}">
+      Hello, {name}. These details live in a cookie on this browser so checkout can
+      prefill them.
+    </p>
+    <p class="lead" else>
+      Save your name and email and checkout will prefill them next time.
+    </p>
+
+    <section class="panel">
+      <h2 if="{signedIn}">Saved details</h2>
+      <h2 else>Add your details</h2>
+
+      <dl class="meta-list" if="{signedIn}">
+        <dt>Name</dt><dd>{name}</dd>
+        <dt>Email</dt><dd>{email}</dd>
+        <dt>Last order</dt><dd>{lastOrder}</dd>
+      </dl>
+
+      <form action="/account" method="post">
+        <input type="hidden" name="action" value="save" />
+        <div class="field">
+          <label for="account-name">Name</label>
+          <input id="account-name" name="name" type="text" autocomplete="name" required value="{name}" />
+        </div>
+        <div class="field">
+          <label for="account-email">Email</label>
+          <input id="account-email" name="email" type="email" autocomplete="email" required value="{email}" />
+        </div>
+        <div class="button-row">
+          <button class="btn" type="submit">Save details</button>
+          <a class="btn btn--ghost" href="/shop">Continue shopping</a>
+        </div>
+      </form>
+
+      <form action="/account" method="post" if="{signedIn}">
+        <input type="hidden" name="action" value="signout" />
+        <p><button type="submit" class="link-button">Forget my details</button></p>
+      </form>
+    </section>
+
+    <p class="muted">
+      This is a cookie-only demo. There is no password, no account server, and no
+      order history stored beyond the last order summary.
+    </p>
+  </main>
+</template>
+<style>
+  .panel {
+    margin-top: 1.5rem;
+  }
+
+  .meta-list {
+    padding-bottom: 1.25rem;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid #e2d2c0;
+  }
+
+  .link-button {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: #8f3f22;
+    font: inherit;
+    font-size: 0.9rem;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+</style>

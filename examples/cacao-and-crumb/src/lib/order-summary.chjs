@@ -1,0 +1,114 @@
+<script>
+  import {
+    cartLines,
+    cartTotals,
+    formatMoney,
+    readCart,
+  } from "./cart.js";
+
+  function $runtime(self) {
+    const target = self.querySelector("[data-order-summary]");
+    const emptyNote = self.querySelector("[data-order-empty]");
+    if (!target) return;
+
+    const items = readCart();
+    const lines = cartLines(items);
+    const totals = cartTotals(items);
+
+    if (lines.length === 0) {
+      target.hidden = true;
+      if (emptyNote) emptyNote.hidden = false;
+      return;
+    }
+
+    const list = document.createElement("ul");
+    for (const line of lines) {
+      const item = document.createElement("li");
+      item.textContent = `${line.quantity} × ${line.product.name} — ${formatMoney(line.lineTotal)}`;
+      list.append(item);
+    }
+
+    const totalsEl = document.createElement("dl");
+    const rows = [
+      ["Subtotal", formatMoney(totals.subtotal)],
+      ["Shipping", totals.shipping ? formatMoney(totals.shipping) : "Free"],
+      ["Total", formatMoney(totals.total)],
+    ];
+    for (const [label, value] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      totalsEl.append(dt, dd);
+    }
+
+    target.replaceChildren(list, totalsEl);
+    target.hidden = false;
+    if (emptyNote) emptyNote.hidden = true;
+  }
+</script>
+<template>
+  <section class="summary" aria-labelledby="order-summary-heading">
+    <h2 id="order-summary-heading">Order summary</h2>
+    <p class="summary__empty" data-order-empty>
+      Your cart is empty. <a href="/shop">Add a bar</a> before checking out.
+    </p>
+    <div data-order-summary hidden></div>
+  </section>
+</template>
+<style>
+  .summary {
+    padding: 1.5rem;
+    border: 1px solid #e2d2c0;
+    border-radius: 18px;
+    background: #fffdf9;
+  }
+
+  .summary h2 {
+    margin-top: 0;
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-size: 1.2rem;
+  }
+
+  .summary__empty {
+    margin: 0;
+    font-size: 0.92rem;
+    color: #5c463a;
+  }
+
+  ul {
+    margin: 0 0 1rem;
+    padding-left: 1.1rem;
+    font-size: 0.92rem;
+  }
+
+  li + li {
+    margin-top: 0.3rem;
+  }
+
+  dl {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.4rem 1rem;
+    margin: 0;
+    padding-top: 0.75rem;
+    border-top: 1px solid #e2d2c0;
+    font-size: 0.92rem;
+  }
+
+  dt {
+    color: #5c463a;
+  }
+
+  dd {
+    margin: 0;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  dt:last-of-type,
+  dd:last-of-type {
+    font-weight: 700;
+    color: #2b1a12;
+  }
+</style>

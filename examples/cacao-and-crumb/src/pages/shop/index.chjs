@@ -1,0 +1,84 @@
+<script>
+  import ProductCard from "../../lib/product-card.chjs";
+  import ShopFilter from "../../lib/shop-filter.chjs";
+
+  export let title = "Shop — Cacao & Crumb";
+  export let description =
+    "Four small-batch chocolate bars, made from single-origin cacao in Portland, Oregon.";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/shop" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+  <meta property="og:image" content="https://cacaoandcrumb.example/assets/og.svg" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="eyebrow">The counter</p>
+    <h1>Shop</h1>
+    <p class="lead">
+      Four bars, all made here. We ship Tuesdays and Fridays; orders over $35 ship free.
+    </p>
+
+    <ShopFilter></ShopFilter>
+
+    <ul class="product-grid">
+      <li>
+        <ProductCard
+          slug="70-dark"
+          name="70% Dark"
+          price="900"
+          note="Dried cherry, cocoa nib, molasses"
+          tags="dark single origin vegan"
+          art="/assets/70-dark.svg"
+        ></ProductCard>
+      </li>
+      <li>
+        <ProductCard
+          slug="milk-sea-salt"
+          name="Milk &amp; Sea Salt"
+          price="1100"
+          note="Caramel, fleur de sel, toasted milk"
+          tags="milk best seller"
+          art="/assets/milk-sea-salt.svg"
+        ></ProductCard>
+      </li>
+      <li>
+        <ProductCard
+          slug="hazelnut-praline"
+          name="Hazelnut Praline"
+          price="1200"
+          note="Roasted hazelnut, brown butter, vanilla"
+          tags="praline nut gift"
+          art="/assets/hazelnut-praline.svg"
+        ></ProductCard>
+      </li>
+      <li>
+        <ProductCard
+          slug="citrus-nib"
+          name="Citrus Nib"
+          price="1000"
+          note="Candied orange, cocoa nib, lemon peel"
+          tags="dark vegan seasonal"
+          art="/assets/citrus-nib.svg"
+        ></ProductCard>
+      </li>
+    </ul>
+
+    <section class="section">
+      <h2>Shipping and storage</h2>
+      <p>
+        Bars leave the workshop within two business days. In warm months we pack with
+        insulated liners and a single ice pack; if your bar arrives bloomed, write to us
+        and we will replace it.
+      </p>
+      <p class="muted">
+        Chocolate keeps for nine months in a cool, dry cupboard. Wrap opened bars in
+        paper, not plastic.
+      </p>
+    </section>
+  </main>
+</template>

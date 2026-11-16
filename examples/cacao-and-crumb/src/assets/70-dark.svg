@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180" role="img" aria-label="70% Dark chocolate bar wrapper">
+  <defs>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5c3620" />
+      <stop offset="1" stop-color="#2a150b" />
+    </linearGradient>
+  </defs>
+  <ellipse cx="120" cy="154" rx="84" ry="13" fill="#2b1a12" opacity=".16" />
+  <g transform="rotate(-5 120 90)">
+    <rect x="32" y="32" width="176" height="112" rx="12" fill="url(#bar)" />
+    <g fill="#3f2414">
+      <rect x="42" y="42" width="48" height="44" rx="5" />
+      <rect x="96" y="42" width="48" height="44" rx="5" />
+      <rect x="150" y="42" width="48" height="44" rx="5" />
+      <rect x="42" y="92" width="48" height="42" rx="5" />
+      <rect x="96" y="92" width="48" height="42" rx="5" />
+      <rect x="150" y="92" width="48" height="42" rx="5" />
+    </g>
+    <g fill="#fff" opacity=".08">
+      <rect x="42" y="42" width="48" height="6" rx="3" />
+      <rect x="96" y="42" width="48" height="6" rx="3" />
+      <rect x="150" y="42" width="48" height="6" rx="3" />
+    </g>
+    <rect x="32" y="32" width="176" height="112" rx="12" fill="none" stroke="#fff" stroke-opacity=".12" />
+  </g>
+</svg>

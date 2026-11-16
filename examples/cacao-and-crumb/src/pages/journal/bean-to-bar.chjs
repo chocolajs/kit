@@ -1,0 +1,75 @@
+<script>
+  export let title = "From sack to bar in six days — Cacao & Crumb";
+  export let description =
+    "What actually happens between the warehouse and the wrapper: sorting, roasting, winnowing, grinding, and resting.";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/journal/bean-to-bar" />
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+  <meta property="article:published_time" content="2026-08-02" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="breadcrumbs"><a href="/journal">Journal</a> / Bean to bar</p>
+    <article class="prose">
+      <header>
+        <p class="eyebrow">Process</p>
+        <h1>From sack to bar in six days</h1>
+        <p class="muted">
+          <time datetime="2026-08-02">August 2, 2026</time> · 7 min read
+        </p>
+      </header>
+
+      <p>
+        A 60-kilo sack of cacao arrives on a Monday. By Saturday it is wrapped bars on
+        a shelf. Here is where the time goes.
+      </p>
+
+      <h2>Day one: sorting</h2>
+      <p>
+        We spread the beans on a stainless table and pull out stones, flat beans, and
+        the occasional twig. It takes two people about three hours for a sack. This is
+        also the first quality check: smell the sack before you open it. If it smells
+        like smoke or mold, stop.
+      </p>
+
+      <h2>Day two: roasting</h2>
+      <p>
+        Roast profiles are per origin. Esmeraldas likes a gentler curve with a longer
+        development phase; Piura can take more heat without losing its fruit. We log
+        bean temperature every thirty seconds and cup the result the next morning.
+      </p>
+
+      <h2>Day three: winnowing and grinding</h2>
+      <p>
+        The roasted beans go through a cracker and a winnower to separate nib from
+        husk. From there the nibs go into the stone grinders with sugar and cocoa
+        butter. The grinders run for 48 hours, which is the least interesting part of
+        the process and the most important.
+      </p>
+
+      <h2>Day five: tempering and molding</h2>
+      <p>
+        After the conche we temper by hand for test batches, or run the machine for
+        the house bar. Bars are molded, chilled for twenty minutes, then unmolded and
+        rested overnight at room temperature.
+      </p>
+
+      <h2>Day six: wrapping</h2>
+      <p>
+        Each bar gets a batch stamp on the back of the wrapper. We keep a few bars from
+        every batch in a cupboard and taste them at one, three, and six months. That
+        is how we know whether a roast profile actually worked.
+      </p>
+
+      <blockquote>
+        “The wrapper is the last step, but the batch date is the first thing we write
+        down.”
+      </blockquote>
+    </article>
+  </main>
+</template>

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180" role="img" aria-label="Hazelnut praline chocolate bar">
+  <defs>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8a5227" />
+      <stop offset="1" stop-color="#4d2a12" />
+    </linearGradient>
+  </defs>
+  <ellipse cx="120" cy="154" rx="84" ry="13" fill="#2b1a12" opacity=".16" />
+  <g transform="rotate(-3 120 90)">
+    <rect x="32" y="32" width="176" height="112" rx="12" fill="url(#bar)" />
+    <g fill="#6b3c1b">
+      <rect x="42" y="42" width="48" height="44" rx="5" />
+      <rect x="96" y="42" width="48" height="44" rx="5" />
+      <rect x="150" y="42" width="48" height="44" rx="5" />
+      <rect x="42" y="92" width="48" height="42" rx="5" />
+      <rect x="96" y="92" width="48" height="42" rx="5" />
+      <rect x="150" y="92" width="48" height="42" rx="5" />
+    </g>
+    <g fill="#d8a978" opacity=".8">
+      <circle cx="58" cy="58" r="4" />
+      <circle cx="70" cy="70" r="3" />
+      <circle cx="112" cy="60" r="3.5" />
+      <circle cx="126" cy="74" r="3" />
+      <circle cx="166" cy="58" r="4" />
+      <circle cx="180" cy="72" r="3" />
+      <circle cx="60" cy="108" r="3" />
+      <circle cx="112" cy="112" r="4" />
+      <circle cx="170" cy="110" r="3.4" />
+    </g>
+    <rect x="32" y="32" width="176" height="112" rx="12" fill="none" stroke="#fff" stroke-opacity=".14" />
+  </g>
+</svg>

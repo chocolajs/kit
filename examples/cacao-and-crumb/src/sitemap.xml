@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://cacaoandcrumb.example/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>
+  <url><loc>https://cacaoandcrumb.example/shop</loc><changefreq>weekly</changefreq><priority>0.9</priority></url>
+  <url><loc>https://cacaoandcrumb.example/shop/70-dark</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://cacaoandcrumb.example/shop/milk-sea-salt</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://cacaoandcrumb.example/shop/hazelnut-praline</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://cacaoandcrumb.example/shop/citrus-nib</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://cacaoandcrumb.example/journal</loc><changefreq>monthly</changefreq><priority>0.7</priority></url>
+  <url><loc>https://cacaoandcrumb.example/journal/tempering</loc><changefreq>yearly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://cacaoandcrumb.example/journal/bean-to-bar</loc><changefreq>yearly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://cacaoandcrumb.example/about</loc><changefreq>yearly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://cacaoandcrumb.example/contact</loc><changefreq>yearly</changefreq><priority>0.7</priority></url>
+</urlset>

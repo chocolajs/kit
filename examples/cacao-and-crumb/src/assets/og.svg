@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#2b1a12" />
+  <circle cx="1010" cy="120" r="240" fill="#8f3f22" opacity=".25" />
+  <circle cx="120" cy="560" r="180" fill="#b5843c" opacity=".14" />
+  <g transform="translate(96 216)">
+    <text x="0" y="0" fill="#fbf6ef" font-family="Georgia, serif" font-size="76">Cacao &amp; Crumb</text>
+    <text x="0" y="70" fill="#d9c3ab" font-family="Helvetica, Arial, sans-serif" font-size="30">Bean-to-bar chocolate, made in small batches.</text>
+    <text x="0" y="132" fill="#b5843c" font-family="Helvetica, Arial, sans-serif" font-size="22" letter-spacing="6">PORTLAND, OREGON</text>
+  </g>
+  <g transform="translate(790 190) rotate(-8)">
+    <rect width="300" height="240" rx="22" fill="#4a2a19" />
+    <g fill="#6b3d22">
+      <rect x="22" y="22" width="76" height="88" rx="8" />
+      <rect x="112" y="22" width="76" height="88" rx="8" />
+      <rect x="202" y="22" width="76" height="88" rx="8" />
+      <rect x="22" y="130" width="76" height="88" rx="8" />
+      <rect x="112" y="130" width="76" height="88" rx="8" />
+      <rect x="202" y="130" width="76" height="88" rx="8" />
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,13 @@
+<script>
+  export let cents = 0;
+
+  function formatPrice(value) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+    }).format((Number(value) || 0) / 100);
+  }
+</script>
+<template>
+  <span class="money">{formatPrice(cents)}</span>
+</template>

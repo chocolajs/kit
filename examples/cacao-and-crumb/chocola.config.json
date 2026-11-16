@@ -1,0 +1,20 @@
+{
+  "bundle": {
+    "srcDir": "src",
+    "outDir": "dist",
+    "pagesDir": "pages",
+    "appFile": "app.html",
+    "staticDir": "static",
+    "emptyOutDir": true,
+    "treeShakeRuntime": true
+  },
+  "dev": {
+    "hostname": "localhost",
+    "port": 3100
+  },
+  "server": {
+    "hostname": "127.0.0.1",
+    "port": 4100,
+    "middleware": "./server-middleware.js"
+  }
+}

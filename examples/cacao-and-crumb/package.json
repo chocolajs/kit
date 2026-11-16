@@ -1,0 +1,12 @@
+{
+  "name": "cacao-and-crumb",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Cacao & Crumb — production-shaped storefront used to beta-test ChocolaKit",
+  "type": "module",
+  "scripts": {
+    "dev": "node ../../bin/chocola.js dev .",
+    "build": "node ../../bin/chocola.js build .",
+    "start": "node ../../bin/chocola.js serve ."
+  }
+}
