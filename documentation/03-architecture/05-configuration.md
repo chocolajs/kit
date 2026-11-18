@@ -5,46 +5,92 @@ description: Technical configuration system
 
 ## Configuration precedence hierarchy
 
-```
+```text
 CLI flags > chocola.config.json > built-in defaults
 ```
 
 ### Evaluation order
 
-1. **CLI flags** — Parsed from command-line arguments (`--port`, `--host`, `--config`, etc.)
-2. **Config file** — Read from `chocola.config.json` if `--config` flag not specified
-3. **Built-in defaults** — Hard-coded values used when neither CLI nor config file provides a value
+1. **CLI flags** — Parsed from command-line arguments (`--port`, `--host`, `--srcDir`, `--outDir`, `--config`, and so on).
+2. **Config file** — Read from `chocola.config.json` at the project root, or from the path passed with `--config`.
+3. **Built-in defaults** — Used when neither CLI nor config file provides a value.
+
+When `--config <path>` is explicit and the file is missing, loading fails with `ENOENT` so typos surface immediately. Without `--config`, a missing `chocola.config.json` silently falls back to defaults.
+
+Unknown top-level keys are preserved in the merged config object for forward compatibility, but Kit itself only reads the documented keys.
 
 ### Configuration schema (internal representation)
 
 ```json
 {
   "bundle": {
-    "srcDir": "src",       // source directory path
-    "outDir": "dist",      // build output directory path
-    "libDir": "lib",       // components subdirectory relative to srcDir
-    "emptyOutDir": true    // whether to clean outDir before each build write
+    "srcDir": "src",
+    "outDir": "dist",
+    "pagesDir": "pages",
+    "appFile": "app.html",
+    "staticDir": "static",
+    "emptyOutDir": true,
+    "treeShakeRuntime": true
   },
   "dev": {
-    "hostname": "localhost", // dev server bind address
-    "port": 3000            // dev server listen port
+    "hostname": "localhost",
+    "port": 3000
   },
   "server": {
-    "port": 8080,          // SSR production server listen port
-    "hostname": "localhost", // SSR server bind address
-    "middleware": null       // path to ESM middleware file, relative to project root
+    "port": 8080,
+    "hostname": "localhost",
+    "middleware": null
   }
 }
 ```
 
+`build` is accepted as an alias for the `bundle` section. If both are present, `bundle` wins.
+
+### Path resolution
+
+- `srcDir` and `outDir` are resolved relative to the project root.
+- `pagesDir`, `appFile`, and `staticDir` are resolved relative to `srcDir`.
+- The resulting absolute paths are used consistently by the dev server, SSR server, and static build.
+
+```json
+{
+  "bundle": {
+    "srcDir": "app",
+    "pagesDir": "routes",
+    "appFile": "shell.html",
+    "staticDir": "public"
+  }
+}
+```
+
+With that config, Kit reads pages from `app/routes/`, the shell from `app/shell.html`, and static assets from `app/public/`.
+
 ### Key internal behaviors
 
-- **`emptyOutDir`** — When `true`, the output directory is recursively cleaned before write operations. When `false`, existing files are preserved and new files overlaid. This affects both SSG build and dev server rebuild behavior.
+- **`emptyOutDir`** — When `true` (the default), `outDir` is recursively cleaned before a static build writes output. When `false`, existing files are preserved and new files are overlaid. Dev mode never writes `outDir`, so this setting does not affect it.
 
-- **Middleware resolution** — `server.middleware` path is resolved relative to the project root at handler initialization. The module is dynamically imported as ESM. If the file is missing or has no default export, middleware is treated as `null` (no middleware installed).
+- **`treeShakeRuntime`** — When `true` (the default), the compiler performs intra-module `$runtime` extraction and omits unused runtime code. It does not perform cross-module reachability; page modules still follow explicit imports.
 
-- **PORT environment variable** — At server startup, `process.env.PORT` takes precedence over `server.port` in config file and `--port` CLI flag. This enables container deployment patterns where the orchestrator assigns the port at runtime.
+- **`libDir`** — Deprecated and ignored. A warning is printed once per project if `libDir` appears in the config or CLI flags. Components enter the graph only through explicit `.chjs` imports; there is no component scan directory.
 
-- **Hostname derivation** — When `PORT` environment variable is set and no explicit hostname is provided via `--host` flag or `server.hostname` config, the server binds to `0.0.0.0`. This is an internal behavioral detail for container compatibility; users typically do not need to specify `--host` when using `PORT`.
+- **Middleware resolution** — `server.middleware` is resolved relative to the project root at handler initialization and imported as ESM. A configured file that does not exist throws immediately. A module with no callable default export is treated as no middleware.
 
-- **Config file absence** — If `chocola.config.json` does not exist at the expected path and `--config` flag is not provided, the framework silently falls back to built-in defaults without error. This allows zero-configuration get-started experiences.
+- **PORT environment variable** — `--port` wins over everything. Otherwise `PORT` wins over `server.port`, which wins over the `8080` default. This enables container platforms that assign a port at runtime.
+
+- **Hostname derivation** — When `PORT` is set and no explicit `--host`/`--hostname` flag or `server.hostname`/`server.host` config exists, the server binds to `0.0.0.0`. An explicit host always wins.
+
+- **Config file absence** — If `chocola.config.json` is absent and `--config` is not provided, the framework falls back to built-in defaults without error. This keeps the zero-configuration experience working.
+
+### Programmatic usage
+
+`loadConfig` and `resolvePaths` are exported from `@chocolajs/kit/config`:
+
+```js
+import { loadConfig, resolvePaths } from "@chocolajs/kit/config";
+
+const { config, paths } = await loadConfig(process.cwd(), {
+  overrides: { outDir: "build" },
+});
+```
+
+The returned `config` is flat (`srcDir`, `outDir`, `pagesDir`, `appFile`, `staticDir`, `emptyOutDir`, `treeShakeRuntime`, `dev`, `server`, plus unknown keys) so it can be forwarded to the compiler directly.

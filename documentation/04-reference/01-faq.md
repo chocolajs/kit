@@ -15,11 +15,7 @@ As of now, ChocolaKit is maintained by only me ([@sadgabi20](https://github.com/
 
 ### How do I install ChocolaKit?
 ```sh
-npm i -g chocola
-```
-Or use it as a dev dependency:
-```sh
-npm i -D chocola
+npm i -g @chocolajs/kit
 ```
 
 ### What's the difference between `chocola` and `chjs`?
@@ -80,7 +76,7 @@ PORT=8080 chocola serve --host 0.0.0.0
 Ensure you've installed ChocolaKit globally: `npm i -g chocola`
 
 ### Hot-reload not working
-Ensure you're running `chocola dev` (not `chocola build`) and that file changes trigger the polling mechanism.
+Ensure you're running `chocola dev` (not `chocola build`) and that file changes under `src/` trigger the watcher. Dev mode reloads the page when a rebuild succeeds.
 
 ### Production build fails
 Check that your `chocola.config.json` is valid JSON and that all configured paths exist.
