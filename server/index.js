@@ -6,12 +6,23 @@ import zlib from "zlib";
 import { pathToFileURL } from "url";
 
 // Chocola imports
-import chalk from "chocola/compiler/chalk.js";
-import { loadConfig, resolvePaths } from "chocola/compiler/config.js";
+import { deterministicHash } from "chocola/compiler/utils.js";
 
-import { buildMultipageGraph, buildRouteTable, matchRoute, renderRoute } from "../routing.js";
+import chalk from "../chalk.js";
+import { loadConfig, resolvePaths } from "../config.js";
+import {
+  buildSiteState,
+  renderRoute,
+  RuntimeStore,
+  writeHashMap,
+} from "../routing.js";
 
-import { getConfig, isMissingConfigFile, queueConfigWarning, flushConfigWarnings } from "../utils.js";
+import {
+  getConfig,
+  isMissingConfigFile,
+  queueConfigWarning,
+  flushConfigWarnings,
+} from "../utils.js";
 
 const warnedServerPort = new Set();
 const warnedServerHostname = new Set();
@@ -84,6 +95,26 @@ function shouldCompress(mime) {
   return /^(text\/|application\/(javascript|json|xml|manifest\+json))/.test(mime);
 }
 
+function isInside(abs, base) {
+  if (!base) return false;
+  const a = path.resolve(abs);
+  const b = path.resolve(base);
+  return a === b || a.startsWith(b + path.sep);
+}
+
+function hasUnsafeSegment(relPosix) {
+  return relPosix
+    .split("/")
+    .some((segment) => segment.startsWith(".") || segment === "node_modules");
+}
+
+function safeCandidate(base, relPosix) {
+  if (!base || !relPosix || relPosix.includes("\0")) return null;
+  if (hasUnsafeSegment(relPosix)) return null;
+  const resolved = path.resolve(base, ...relPosix.split("/"));
+  return isInside(resolved, base) ? resolved : null;
+}
+
 async function loadMiddleware(rootDir, middlewarePath) {
   if (!middlewarePath) return [];
   const resolved = path.isAbsolute(middlewarePath)
@@ -99,14 +130,11 @@ async function loadMiddleware(rootDir, middlewarePath) {
   if (Array.isArray(raw)) return raw.filter((fn) => typeof fn === "function");
   if (typeof raw === "function") return [raw];
   if (raw && typeof raw === "object") {
-    // handle named exports
     const fns = Object.values(raw).filter((v) => typeof v === "function");
     if (fns.length) return fns;
   }
   return [];
 }
-
-
 
 function sendNotModified(res) {
   res.writeHead(304);
@@ -124,7 +152,6 @@ function serveBuffer(req, res, buffer, contentType, etag, mtime) {
 
   const inm = req.headers["if-none-match"];
   if (inm && inm === etag) {
-    // Weak comparison is okay for demo; exact match suffices
     sendNotModified(res);
     return;
   }
@@ -173,54 +200,105 @@ function normalizeRootDir(arg, opts) {
   if (typeof arg === "string") {
     return { rootDir: arg, opts: opts || {} };
   }
-  // fallback
   return { rootDir: String(arg), opts: opts || {} };
 }
 
+async function serveFile(req, res, filePath) {
+  const stat = await fs.stat(filePath);
+  if (!stat.isFile()) return false;
+  const buffer = await fs.readFile(filePath);
+  serveBuffer(
+    req,
+    res,
+    buffer,
+    getMimeType(filePath),
+    generateETag(buffer),
+    stat.mtime
+  );
+  return true;
+}
+
 export async function createHandler(rootDirArg, optsArg) {
-   const { rootDir, opts } = normalizeRootDir(rootDirArg, optsArg);
-   const silent = opts.silent ?? false;
+  const { rootDir, opts } = normalizeRootDir(rootDirArg, optsArg);
+  const root = path.resolve(rootDir);
+  const silent = opts.silent ?? false;
 
-   const fullConfig = await getConfig(rootDir, { silent });
-   const config = await loadConfig(rootDir, { silent });
-   const paths = resolvePaths(rootDir, config);
+  const fullConfig = await getConfig(root, { silent });
 
-   const graph = await buildMultipageGraph(rootDir);
+  let config = opts.config;
+  let paths = opts.paths;
+  if (!config) {
+    ({ config, paths } = await loadConfig(root, {
+      silent,
+      overrides: opts.overrides || {},
+    }));
+  } else if (!paths) {
+    paths = resolvePaths(root, config);
+  }
+
+  const state = await buildSiteState(root, { config, paths });
+  const routeTable = state.routeTable;
+
+  const runtimeStore = new RuntimeStore(root);
+  await runtimeStore.clear();
 
   const middlewarePath = opts.middleware ?? fullConfig.server?.middleware ?? null;
-  const middlewares = await loadMiddleware(rootDir, middlewarePath);
+  const middlewares = await loadMiddleware(root, middlewarePath);
 
-  const routeTable = buildRouteTable(graph);
+  // pathname -> { buffer, etag, mtime, type }
+  const virtualFiles = new Map();
 
-  // virtual file store for dynamically generated assets (run-*.js, sc-*.css, css-*.css, js-*.js)
-  const virtualFiles = new Map(); // pathname -> { buffer, etag, mtime, type }
+  function rememberVirtual(name, content, type) {
+    const key = "/" + String(name).replace(/^\/+/, "");
+    const buffer = Buffer.from(content, "utf-8");
+    virtualFiles.set(key, {
+      buffer,
+      etag: generateETag(buffer),
+      mtime: new Date(),
+      type: type || getMimeType(key),
+    });
+    return key;
+  }
 
-  function ingest(result) {
-    for (const file of result.files) {
-      const key = "/" + file.path;
-      const buf = Buffer.from(file.content, "utf-8");
-      const etag = generateETag(buf);
-      virtualFiles.set(key, {
-        buffer: buf,
-        etag,
-        mtime: new Date(),
-        type: getMimeType(file.path),
-      });
+  async function ingest(result) {
+    let scoped = null;
+    if (result.styles) {
+      scoped = `sc-${deterministicHash(result.styles, 6)}.css`;
+      rememberVirtual(scoped, result.styles, "text/css; charset=utf-8");
+    }
+
+    const runtime = result.runtime || [];
+    for (const chunk of runtime) {
+      rememberVirtual(chunk.name, chunk.content, "text/javascript; charset=utf-8");
+    }
+    if (runtime.length > 0) {
+      await runtimeStore.add(runtime);
+    }
+
+    return { scoped, runtime };
+  }
+
+  // Warm every route with empty ctx so invariant chunks, scoped CSS, and the
+  // hash map exist before the first request.
+  const warmResults = new Map();
+  const hashMap = {};
+
+  for (const route of [...state.pages.keys()].sort()) {
+    try {
+      const result = await renderRoute(state, route, {});
+      warmResults.set(route, result);
+      Object.assign(hashMap, result.hashMap);
+      await ingest(result);
+    } catch (err) {
+      console.warn(
+        "[chocola/server] initial render failed:",
+        err?.message || err
+      );
     }
   }
 
-  // Prime virtual files with initial render of every route
-  // (ensures assets exist even before first SSR)
-  try {
-    const routes = graph.pages ? [...graph.pages.keys()].sort() : ["/"];
-    for (const route of routes) {
-      const initial = await renderRoute(graph, route, {});
-      ingest(initial);
-    }
-  } catch (e) {
-    // If initial render fails, continue; per-request render will surface error
-    console.warn("[chocola/server] initial render failed:", e?.message || e);
-  }
+  await writeHashMap(state, hashMap);
+  state.hashMap = hashMap;
 
   async function handler(req, res) {
     try {
@@ -228,21 +306,20 @@ export async function createHandler(rootDirArg, optsArg) {
       const url = new URL(req.url, `http://${host}`);
       let pathname = decodeURIComponent(url.pathname);
 
-      // Normalize pathname: remove duplicate slashes
+      // Normalize duplicate slashes; keep trailing slash for route lookup.
       pathname = pathname.replace(/\/+/g, "/");
-      // Keep as is; do not strip trailing slash except for route lookup
 
       const query = Object.fromEntries(url.searchParams.entries());
       const cookies = parseCookies(req.headers.cookie || "");
 
       // 1) SSR route?
-      const matched = matchRoute(routeTable, pathname);
+      const matched = routeTable.get(pathname) || routeTable.get(pathname.replace(/\/+$/, "") || "/");
 
       if (matched) {
-        const { page, route } = matched;
-        // Build per-request ctx via middleware
+        const page = matched;
+        const route = page.route;
+
         let ctx = { ...query };
-        // Also merge opts.ctx if provided (for programmatic use)
         if (opts.ctx && typeof opts.ctx === "object") Object.assign(ctx, opts.ctx);
 
         for (const mw of middlewares) {
@@ -265,94 +342,100 @@ export async function createHandler(rootDirArg, optsArg) {
                 searchParams: url.searchParams,
               });
             }
-          } catch (e) {
-            console.error("[chocola/server] middleware error:", e);
+          } catch (err) {
+            console.error("[chocola/server] middleware error:", err);
             if (!res.headersSent && !res.writableEnded) {
               res.writeHead(500, { "Content-Type": "text/plain" });
               res.end("Internal middleware error");
             }
             return;
           }
-          if (res.writableEnded || res.headersSent) {
-            return;
-          }
-          if (result && typeof result === "object" && !Array.isArray(result) && !(result instanceof Buffer)) {
-            // Merge returned object into ctx
+          if (res.writableEnded || res.headersSent) return;
+          if (
+            result &&
+            typeof result === "object" &&
+            !Array.isArray(result) &&
+            !(result instanceof Buffer)
+          ) {
             Object.assign(ctx, result);
           }
         }
 
         let result;
         try {
-          result = await renderRoute(graph, route, ctx);
-        } catch (e) {
+          result = await renderRoute(state, route, ctx);
+        } catch (err) {
           if (!res.headersSent && !res.writableEnded) {
             res.writeHead(500, { "Content-Type": "text/plain" });
-            res.end("Render error: " + (e?.message || e));
+            res.end("Render error: " + (err?.message || err));
           }
           return;
         }
 
-        ingest(result);
+        Object.assign(hashMap, result.hashMap);
+        await ingest(result);
 
         const htmlBuf = Buffer.from(result.html, "utf-8");
-        const etag = generateETag(htmlBuf);
-        const mtime = new Date();
-        const ctype = "text/html; charset=utf-8";
-        serveBuffer(req, res, htmlBuf, ctype, etag, mtime);
+        serveBuffer(
+          req,
+          res,
+          htmlBuf,
+          "text/html; charset=utf-8",
+          generateETag(htmlBuf),
+          new Date()
+        );
         return;
       }
 
-      // 2) Virtual files (bundled css, js, runtime, scoped css)
+      // 2) Runtime CSS/JS generated by the SSR pipeline.
       if (virtualFiles.has(pathname)) {
         const entry = virtualFiles.get(pathname);
         serveBuffer(req, res, entry.buffer, entry.type, entry.etag, entry.mtime);
         return;
       }
 
-      // Also handle "./" prefix that html emits: href="./css-xxx.css" leads to request "/css-xxx.css" after browser resolves, but also handle "./" stripping
-      // Already handled by virtualFiles via "/" prefix. For safety, try without leading slash variations
-      // Next: try static file from src
-      // Remove leading "/" and resolve against src dir
-      const relative = pathname.replace(/^\/+/, "");
-      // Prevent directory traversal
-      const safe = path.normalize(relative).replace(/^(\.\.(\/|\\|$))+/g, "");
-      const candidatePaths = [
-        path.join(paths.src, safe),
-        path.join(paths.src, safe + ".html"),
-      ];
+      // 3) Source assets: /<src-relative> from srcDir.
+      const rel = pathname.replace(/^\/+/, "");
 
-      for (const cand of candidatePaths) {
-        try {
-          const stat = await fs.stat(cand);
-          if (stat.isFile()) {
-            const buf = await fs.readFile(cand);
-            const etag = generateETag(buf);
-            const mtime = stat.mtime;
-            const ctype = getMimeType(cand);
-            serveBuffer(req, res, buf, ctype, etag, mtime);
-            return;
+      if (rel && !rel.toLowerCase().endsWith(".chjs")) {
+        const srcCandidates = [rel];
+        if (!/\.[a-z0-9]+$/i.test(rel)) srcCandidates.push(rel + ".html");
+
+        for (const candidateRel of srcCandidates) {
+          const candidate = safeCandidate(paths.srcDir, candidateRel);
+          if (!candidate) continue;
+          if (path.resolve(candidate) === path.resolve(paths.appFile)) continue;
+
+          try {
+            if (await serveFile(req, res, candidate)) return;
+            const stat = await fs.stat(candidate);
+            if (stat.isDirectory()) {
+              const index = safeCandidate(paths.srcDir, candidateRel + "/index.html");
+              if (index && (await serveFile(req, res, index))) return;
+            }
+          } catch {
+            // Try the next candidate.
           }
-          if (stat.isDirectory()) {
-            // try index.html inside
-            const idx = path.join(cand, "index.html");
+        }
+
+        // 4) Static files from a staticDir configured outside srcDir.
+        if (!isInside(paths.staticDir, paths.srcDir)) {
+          const staticCandidate = safeCandidate(paths.staticDir, rel);
+          if (staticCandidate) {
             try {
-              const s2 = await fs.stat(idx);
-              if (s2.isFile()) {
-                const buf = await fs.readFile(idx);
-                const etag = generateETag(buf);
-                serveBuffer(req, res, buf, getMimeType(idx), etag, s2.mtime);
-                return;
-              }
-            } catch {}
+              if (await serveFile(req, res, staticCandidate)) return;
+            } catch {
+              // Fall through to 404.
+            }
           }
-        } catch {}
+        }
       }
 
-      // Fallback 404
       if (!res.headersSent && !res.writableEnded) {
         res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
-        res.end("<h1>404 Not Found</h1><p>The requested resource was not found.</p>");
+        res.end(
+          "<h1>404 Not Found</h1><p>The requested resource was not found.</p>"
+        );
       }
     } catch (err) {
       console.error("[chocola/server] handler error:", err);
@@ -363,14 +446,23 @@ export async function createHandler(rootDirArg, optsArg) {
     }
   }
 
-  // Flush config warnings before returning handler so they appear before any subsequent logs
-  flushConfigWarnings(rootDir);
+  flushConfigWarnings(root);
 
-  // Attach helpers for testing / introspection
-  handler.graph = graph;
+  const graphs = new Map();
+  for (const [route, page] of state.pages) {
+    graphs.set(route, page.graph);
+  }
+
+  // Attach helpers for testing / introspection.
+  handler.state = state;
+  handler.paths = state.paths;
+  handler.routes = state.pages;
+  handler.graphs = graphs;
+  handler.routeTable = routeTable;
+  handler.hashMap = hashMap;
   handler.virtualFiles = virtualFiles;
-  handler.routeTable = buildRouteTable(graph);
-  handler.paths = paths;
+  handler.runtimeStore = runtimeStore;
+  handler.warmResults = warmResults;
 
   return handler;
 }
@@ -380,31 +472,54 @@ export const createServer = createHandler;
 export const createServerRenderer = createHandler; // future ssr escape hatch alias
 
 export async function serve(rootDirArg, optsArg) {
-   const { rootDir } = normalizeRootDir(rootDirArg, optsArg);
-   const silent = optsArg?.silent ?? false;
-   const fullConfig = await getConfig(rootDir, { silent });
-   const serverCfg = fullConfig.server || {};
-   const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
-   const hasEnvPort = Number.isFinite(envPort) && envPort >= 1 && envPort <= 65535;
-   const port = optsArg?.port ?? (hasEnvPort ? envPort : (serverCfg.port ?? 8080));
-   const hasHostFlag = optsArg?.hostname != null || optsArg?.host != null;
-   const hasHostConfig = serverCfg.hostname != null || serverCfg.host != null;
-   const hostname = hasHostFlag ? (optsArg?.hostname ?? optsArg?.host) : (hasEnvPort && !hasHostConfig ? "0.0.0.0" : (serverCfg.hostname ?? serverCfg.host ?? "localhost"));
+  const { rootDir } = normalizeRootDir(rootDirArg, optsArg);
+  const silent = optsArg?.silent ?? false;
+  const fullConfig = await getConfig(rootDir, { silent });
+  const serverCfg = fullConfig.server || {};
+  const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
+  const hasEnvPort = Number.isFinite(envPort) && envPort >= 1 && envPort <= 65535;
+  const port =
+    optsArg?.port ?? (hasEnvPort ? envPort : serverCfg.port ?? 8080);
+  const hasHostFlag = optsArg?.hostname != null || optsArg?.host != null;
+  const hasHostConfig = serverCfg.hostname != null || serverCfg.host != null;
+  const hostname = hasHostFlag
+    ? optsArg?.hostname ?? optsArg?.host
+    : hasEnvPort && !hasHostConfig
+      ? "0.0.0.0"
+      : serverCfg.hostname ?? serverCfg.host ?? "localhost";
 
-   if (!silent) {
-     if (isMissingConfigFile(fullConfig)) {
-       // top-level already warned
-     } else if (fullConfig.server != null) {
-       if (serverCfg.port == null && optsArg?.port == null && !warnedServerPort.has(rootDir)) {
-         warnedServerPort.add(rootDir);
-         queueConfigWarning(rootDir, chalk.bold.yellow("WARNING!"), `server.port not defined in chocola.config.json file: using default ${port} server.port.`);
-       }
-       if ((serverCfg.hostname == null && serverCfg.host == null) && (optsArg?.hostname == null && optsArg?.host == null) && !warnedServerHostname.has(rootDir)) {
-         warnedServerHostname.add(rootDir);
-         queueConfigWarning(rootDir, chalk.bold.yellow("WARNING!"), `server.hostname not defined in chocola.config.json file: using default ${hostname} server.hostname.`);
-       }
-     }
-   }
+  if (!silent) {
+    if (isMissingConfigFile(fullConfig)) {
+      // top-level already warned
+    } else if (fullConfig.server != null) {
+      if (
+        serverCfg.port == null &&
+        optsArg?.port == null &&
+        !warnedServerPort.has(rootDir)
+      ) {
+        warnedServerPort.add(rootDir);
+        queueConfigWarning(
+          rootDir,
+          chalk.bold.yellow("WARNING!"),
+          `server.port not defined in chocola.config.json file: using default ${port} server.port.`
+        );
+      }
+      if (
+        serverCfg.hostname == null &&
+        serverCfg.host == null &&
+        optsArg?.hostname == null &&
+        optsArg?.host == null &&
+        !warnedServerHostname.has(rootDir)
+      ) {
+        warnedServerHostname.add(rootDir);
+        queueConfigWarning(
+          rootDir,
+          chalk.bold.yellow("WARNING!"),
+          `server.hostname not defined in chocola.config.json file: using default ${hostname} server.hostname.`
+        );
+      }
+    }
+  }
 
   const handler = await createHandler(rootDir, optsArg);
 

@@ -1,0 +1,49 @@
+<script>
+  export let title = "Journal — Cacao & Crumb";
+  export let description =
+    "Notes from the workshop: tempering, sourcing, and the small decisions behind every bar.";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/journal" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="eyebrow">Notes from the workshop</p>
+    <h1>Journal</h1>
+    <p class="lead">
+      We write down what we learn: roasting curves, tempering failures, and the
+      occasional argument about salt.
+    </p>
+
+    <ul class="post-list">
+      <li>
+        <a href="/journal/tempering">
+          <h2>Tempering by hand, and why we still do it</h2>
+          <p>Snap, shine, and the 31°C window that makes or breaks a batch.</p>
+          <time datetime="2026-09-18">September 18, 2026</time>
+        </a>
+      </li>
+      <li>
+        <a href="/journal/bean-to-bar">
+          <h2>From sack to bar in six days</h2>
+          <p>What actually happens between the warehouse and the wrapper.</p>
+          <time datetime="2026-08-02">August 2, 2026</time>
+        </a>
+      </li>
+    </ul>
+
+    <section class="section">
+      <h2>Get the occasional letter</h2>
+      <p>
+        Batch announcements, tasting dates, and one recipe per season. No more than
+        six emails a year.
+      </p>
+      <p><a class="btn" href="/contact">Ask to be added</a></p>
+    </section>
+  </main>
+</template>

@@ -3,539 +3,1050 @@ import assert from "node:assert/strict";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
-import http from "http";
 import { fileURLToPath } from "url";
 
 import {
   discoverPages,
-  buildMultipageGraph,
+  buildSiteState,
   buildRouteTable,
   matchRoute,
   renderRoute,
-  emitMultipage,
+  emitSite,
+  assembleDocument,
+  extractPageDirectives,
   filePathToRoute,
   routeAliases,
-  pageComponentName,
-  pageComponentTag,
-  toComponentSFC,
-  injectPageIntoLayout,
-  injectHeadIntoLayout,
-  splitPageHead,
+  RuntimeStore,
+  writeHashMap,
   BODY_SLOT_TAG,
   HEAD_SLOT_TAG,
 } from "../routing.js";
-import { createHandler } from "../server/index.js";
+
+// Chocola imports
+import { deterministicHash } from "chocola/compiler/utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_BASIC = path.join(__dirname, "fixtures", "basic");
-const FIXTURE_SERVER = path.join(__dirname, "fixtures", "server");
 
-function httpGet(baseUrl, pathname) {
-  const url = new URL(pathname, baseUrl);
-  return new Promise((resolve, reject) => {
-    const req = http.request(url, (res) => {
-      const chunks = [];
-      res.on("data", (c) => chunks.push(c));
-      res.on("end", () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString("utf-8") }));
-    });
-    req.on("error", reject);
-    req.end();
+const SHELL = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="/styles.css" />
+  <${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}>
+</head>
+<body>
+  <${BODY_SLOT_TAG}></${BODY_SLOT_TAG}>
+</body>
+</html>`;
+
+const SHELL_WITHOUT_HEAD_SLOT = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+</head>
+<body>
+  <${BODY_SLOT_TAG}></${BODY_SLOT_TAG}>
+</body>
+</html>`;
+
+const GREETING = `<script>
+  export let name = "World";
+</script>
+<template>
+  <div class="greeting">Hello {name}!</div>
+</template>
+<style>
+  .greeting { color: blue; }
+</style>`;
+
+const SIMPLE_INDEX = `<template><main>Home</main></template>`;
+
+const CONFIG = { bundle: { srcDir: "src", outDir: "dist" } };
+
+function stripAnsi(value) {
+  return String(value).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+async function captureWarnings(fn) {
+  const warns = [];
+  const original = console.warn;
+  console.warn = (...args) => warns.push(stripAnsi(args.join(" ")));
+  try {
+    await fn();
+  } finally {
+    console.warn = original;
+  }
+  return warns;
+}
+
+async function writePage(root, rel, source) {
+  const file = path.join(root, "src", "pages", rel);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, source);
+}
+
+async function writeLib(root, rel, source) {
+  const file = path.join(root, "src", "lib", rel);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, source);
+}
+
+async function makeApp({
+  appHtml = SHELL,
+  pages = { "index.chjs": SIMPLE_INDEX },
+  lib = {},
+  config = CONFIG,
+  assets = { "styles.css": "body { background: #fafaf8; }\n" },
+} = {}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-routing-"));
+  const src = path.join(root, "src");
+  await fs.mkdir(src, { recursive: true });
+  await fs.mkdir(path.join(src, "static"), { recursive: true });
+
+  if (config !== null) {
+    await fs.writeFile(
+      path.join(root, "chocola.config.json"),
+      JSON.stringify(config, null, 2)
+    );
+  }
+  if (appHtml !== null) {
+    await fs.writeFile(path.join(src, "app.html"), appHtml);
+  }
+  for (const [rel, content] of Object.entries(assets)) {
+    const file = path.join(src, rel);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, content);
+  }
+  for (const [rel, source] of Object.entries(pages)) {
+    await writePage(root, rel, source);
+  }
+  for (const [rel, source] of Object.entries(lib)) {
+    await writeLib(root, rel, source);
+  }
+  return root;
+}
+
+async function makeMultipageApp() {
+  return makeApp({
+    pages: {
+      "index.chjs": `<script>
+  import Greeting from "../lib/greeting.chjs";
+  export let title = "Home";
+</script>
+<${HEAD_SLOT_TAG}><title>{title} | Site</title><meta name="description" content="Welcome {title}"></${HEAD_SLOT_TAG}>
+<template><main>Home <Greeting /></main></template>`,
+      "about.chjs": `<${HEAD_SLOT_TAG}><title>About | Site</title></${HEAD_SLOT_TAG}>
+<template><main>About page</main></template>`,
+      "blog/index.chjs": `<template><main>Blog index</main></template>`,
+      "blog/post.chjs": `<template><main>Post page</main></template>`,
+    },
+    lib: { "greeting.chjs": GREETING },
   });
 }
 
-const GREETING_SFC =
-  `<script>export let name = "World";</` + `script><template><div>Hello {name}!</div></template>`;
-
-const LAYOUT_HTML =
-  `<!DOCTYPE html><html><head><meta charset="utf-8"><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}></head><body><header>NAV</header><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}><footer>FOOT</footer></body></html>`;
-
-async function makeLayoutApp() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-layout-"));
-  const src = path.join(tmp, "src");
-  await fs.mkdir(path.join(src, "lib"), { recursive: true });
-  await fs.mkdir(path.join(src, "pages", "blog"), { recursive: true });
-  await fs.writeFile(path.join(src, "app.html"), LAYOUT_HTML);
-  await fs.writeFile(
-    path.join(src, "pages", "index.html"),
-    `<script>export let name = "World";</` +
-      `script>\n<${HEAD_SLOT_TAG}><title>Home | {name}</title><meta name="description" content="Welcome {name}"></${HEAD_SLOT_TAG}>\n<template><main>Home {name}</main></template>`
-  );
-  await fs.writeFile(
-    path.join(src, "pages", "about.html"),
-    `<${HEAD_SLOT_TAG}><title>About | Site</title></${HEAD_SLOT_TAG}><main>About page</main>`
-  );
-  await fs.writeFile(
-    path.join(src, "pages", "blog", "index.html"),
-    `<template><main>Blog index</main></template>`
-  );
-  await fs.writeFile(path.join(src, "pages", "blog", "post.html"), `<main>Post page</main>`);
-  await fs.writeFile(path.join(src, "lib", "greeting.html"), GREETING_SFC);
-  await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({ bundle: { srcDir: "src", outDir: "dist" } }));
-  return tmp;
+async function listDir(dir) {
+  try {
+    return (await fs.readdir(dir)).sort();
+  } catch {
+    return [];
+  }
 }
 
-async function makeLegacyApp() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-legacy-"));
-  const src = path.join(tmp, "src");
-  await fs.mkdir(path.join(src, "lib"), { recursive: true });
-  await fs.writeFile(
-    path.join(src, "index.html"),
-    `<!DOCTYPE html><html><head><title>Home</title></head><body><app><Greeting name="Home" /></app></body></html>`
-  );
-  await fs.writeFile(
-    path.join(src, "about.html"),
-    `<!DOCTYPE html><html><head><title>About</title></head><body><app><Greeting name="About" /></app></body></html>`
-  );
-  await fs.writeFile(path.join(src, "lib", "greeting.html"), GREETING_SFC);
-  await fs.writeFile(path.join(tmp, "chocola.config.json"), JSON.stringify({ bundle: { srcDir: "src", outDir: "dist" } }));
-  return tmp;
-}
-
-describe("routing — filePathToRoute", () => {
-  test("maps pages-relative paths to clean routes", () => {
-    assert.equal(filePathToRoute("index.html"), "/");
-    assert.equal(filePathToRoute("about.html"), "/about");
-    assert.equal(filePathToRoute("blog/index.html"), "/blog");
-    assert.equal(filePathToRoute("blog/post.html"), "/blog/post");
+describe("routing — file paths and aliases", () => {
+  test("maps .chjs page paths to clean routes", () => {
+    assert.equal(filePathToRoute("index.chjs"), "/");
+    assert.equal(filePathToRoute("about.chjs"), "/about");
+    assert.equal(filePathToRoute("blog/index.chjs"), "/blog");
+    assert.equal(filePathToRoute("blog/post.chjs"), "/blog/post");
   });
 
-  test("routeAliases covers clean, slash and .html forms", () => {
+  test("routeAliases covers clean, slash, .html and index forms", () => {
     assert.deepEqual(routeAliases("/", "index.html"), ["/", "/index", "/index.html"]);
     assert.ok(routeAliases("/about", "about.html").includes("/about"));
     assert.ok(routeAliases("/about", "about.html").includes("/about/"));
     assert.ok(routeAliases("/about", "about.html").includes("/about.html"));
     assert.ok(routeAliases("/blog", "blog/index.html").includes("/blog/index.html"));
+    assert.ok(routeAliases("/blog", "blog/index.html").includes("/blog.html"));
   });
 });
 
-describe("routing — layout helpers", () => {
-  test("pageComponentName is deterministic and identifier-safe", () => {
-    assert.equal(pageComponentName("/"), "chocolakitpageindex.html");
-    assert.equal(pageComponentName("/about"), "chocolakitpageabout.html");
-    assert.equal(pageComponentName("/blog/post"), "chocolakitpageblogpost.html");
-    assert.match(pageComponentName("/a-b_c"), /^[a-z0-9.]+$/);
-  });
+describe("routing — page directives", () => {
+  const BODY = `<template><main>Hi</main></template>`;
 
-  test("pageComponentTag capitalizes the component base", () => {
-    assert.equal(pageComponentTag("chocolakitpageabout.html"), "Chocolakitpageabout");
-  });
-
-  test("toComponentSFC leaves SFC sources untouched", () => {
-    const sfc = `<script>export let x;</` + `script><template><div>{x}</div></template>`;
-    assert.equal(toComponentSFC(sfc), sfc);
-  });
-
-  test("toComponentSFC wraps fragments and full documents as templates", () => {
-    const frag = toComponentSFC(`<main>Hi</main>`);
-    assert.ok(frag.includes("<template>") && frag.includes("<main>Hi</main>"));
-    const doc = toComponentSFC(
-      `<!DOCTYPE html><html><head><title>T</title></head><body><main>Hi</main></body></html>`
+  test("extracts a top-level head block and removes it from core source", () => {
+    const { source, headSource } = extractPageDirectives(
+      `<${HEAD_SLOT_TAG}><title>Hi</title><meta name="x" content="y"></${HEAD_SLOT_TAG}>${BODY}`,
+      "pages/index.chjs"
     );
-    assert.ok(doc.includes("<template>") && doc.includes("<main>Hi</main>"));
-    assert.ok(!doc.includes("<body>"), "layout chrome must not leak into page template");
+    assert.equal(headSource, `<title>Hi</title><meta name="x" content="y">`);
+    assert.ok(!source.includes(HEAD_SLOT_TAG));
+    assert.ok(source.includes("<main>Hi</main>"));
   });
 
-  test("injectPageIntoLayout replaces the body slot and forwards attrs", () => {
-    const out = injectPageIntoLayout(LAYOUT_HTML, "Chocolakitpageabout");
-    assert.ok(out.includes("<app><Chocolakitpageabout></Chocolakitpageabout></app>"));
-    assert.ok(!out.includes(BODY_SLOT_TAG));
-    assert.ok(out.includes("NAV") && out.includes("FOOT"), "layout chrome preserved");
+  test("returns a null head when the page has none", () => {
+    const { source, headSource } = extractPageDirectives(BODY, "page");
+    assert.equal(headSource, null);
+    assert.equal(source, BODY);
   });
 
-  test("splitPageHead separates head fragment from body SFC", () => {
-    const { head, sfc } = splitPageHead(
-      `<${HEAD_SLOT_TAG}><title>Hi</title></${HEAD_SLOT_TAG}><template><main>Hi</main></template>`
-    );
-    assert.equal(head, "<title>Hi</title>");
-    assert.ok(sfc.includes("<main>Hi</main>") && !sfc.includes(HEAD_SLOT_TAG));
-    const none = splitPageHead(`<template><main>Hi</main></template>`);
-    assert.equal(none.head, null);
-  });
-
-  test("splitPageHead rejects duplicate and nested head tags", () => {
+  test("rejects duplicate, nested and misplaced head blocks", () => {
     assert.throws(
       () =>
-        splitPageHead(
-          `<${HEAD_SLOT_TAG}><title>A</title></${HEAD_SLOT_TAG}><${HEAD_SLOT_TAG}><title>B</title></${HEAD_SLOT_TAG}><template><div /></template>`
+        extractPageDirectives(
+          `<${HEAD_SLOT_TAG}><title>A</title></${HEAD_SLOT_TAG}><${HEAD_SLOT_TAG}><title>B</title></${HEAD_SLOT_TAG}>${BODY}`,
+          "page"
         ),
       /at most one/
     );
     assert.throws(
-      () => splitPageHead(`<template><div><${HEAD_SLOT_TAG}><title>A</title></${HEAD_SLOT_TAG}></div></template>`),
-      /top-level/
+      () =>
+        extractPageDirectives(
+          `<template><div><${HEAD_SLOT_TAG}><title>A</title></${HEAD_SLOT_TAG}></div></template>`,
+          "page"
+        ),
+      /top-level page tag/
+    );
+    assert.throws(
+      () =>
+        extractPageDirectives(
+          `<div><${HEAD_SLOT_TAG}><title>A</title></${HEAD_SLOT_TAG}></div>${BODY}`,
+          "page"
+        ),
+      /nested inside another element/
+    );
+    assert.throws(
+      () =>
+        extractPageDirectives(
+          `</${HEAD_SLOT_TAG}>${BODY}`,
+          "page"
+        ),
+      /unexpected/
+    );
+    assert.throws(
+      () =>
+        extractPageDirectives(
+          `<${HEAD_SLOT_TAG}><title>Hi</title>${BODY}`,
+          "page"
+        ),
+      /unclosed <chocolakit:head>/
     );
   });
 
-  test("splitPageHead rejects non-head elements", () => {
+  test("rejects non-head elements inside the head block", () => {
     assert.throws(
-      () => splitPageHead(`<${HEAD_SLOT_TAG}><script src="x.js"></${HEAD_SLOT_TAG}><template><div /></template>`),
+      () =>
+        extractPageDirectives(
+          `<${HEAD_SLOT_TAG}><script src="x.js"></script></${HEAD_SLOT_TAG}>${BODY}`,
+          "page"
+        ),
       /only supports/
     );
   });
 
-  test("injectHeadIntoLayout renders fragment with ctx interpolation", () => {
-    const layout = `<html><head><meta charset="utf-8"><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}></head><body></body></html>`;
-    const page =
-      `<script>export let name = "World";</` +
-      `script>\n<${HEAD_SLOT_TAG}><title>Hi {name}</title></${HEAD_SLOT_TAG}>\n<template><main /></template>`;
-    const out = injectHeadIntoLayout(layout, page, { name: "Alice" });
-    assert.ok(out.includes("<title>Hi Alice</title>"));
-    assert.ok(!out.includes(HEAD_SLOT_TAG));
-    assert.ok(out.includes('<meta charset="utf-8">'), "layout head preserved");
+  test("rejects unknown chocolakit directives and <app>", () => {
+    assert.throws(
+      () =>
+        extractPageDirectives(
+          `<${BODY_SLOT_TAG}></${BODY_SLOT_TAG}>${BODY}`,
+          "page"
+        ),
+      /not a supported page directive/
+    );
+    assert.throws(
+      () => extractPageDirectives(`<app></app>${BODY}`, "page"),
+      /<app> is no longer supported/
+    );
   });
 
-  test("injectHeadIntoLayout leaves layout head untouched without page head", () => {
-    const layout = `<html><head><title>Site</title><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}></head><body></body></html>`;
-    const out = injectHeadIntoLayout(layout, `<template><main /></template>`, {});
-    assert.ok(out.includes("<title>Site</title>"));
+  test("requires exactly one template section", () => {
+    assert.throws(
+      () => extractPageDirectives(`<${HEAD_SLOT_TAG}><title>A</title></${HEAD_SLOT_TAG}>`, "page"),
+      /exactly one <template>/
+    );
+    assert.throws(
+      () => extractPageDirectives(BODY + BODY, "page"),
+      /exactly one <template>.*found 2/
+    );
+    assert.throws(
+      () => extractPageDirectives(`<template><main>Hi`, "page"),
+      /unclosed <template>/
+    );
   });
 });
 
 describe("routing — discovery", () => {
-  test("layout mode: pages/ maps to routes, app.html is the layout", async () => {
-    const tmp = await makeLayoutApp();
+  test("migrated basic fixture maps pages/index.chjs to /", async () => {
+    const pages = await discoverPages(FIXTURE_BASIC);
+    assert.equal(pages.length, 1);
+    const [page] = pages;
+    assert.equal(page.route, "/");
+    assert.equal(page.srcRel, "pages/index.chjs");
+    assert.equal(page.entry, "pages/index.chjs");
+    assert.equal(page.outRel, "index.html");
+    assert.ok(page.headSource.includes("<title>{title}</title>"));
+    assert.ok(!page.source.includes(HEAD_SLOT_TAG));
+  });
+
+  test("multipage apps map routes and outRel", async () => {
+    const root = await makeMultipageApp();
     try {
-      const { mode, pages, layoutFile } = await discoverPages(tmp);
-      assert.equal(mode, "layout");
-      assert.ok(layoutFile.endsWith("app.html"));
+      const pages = await discoverPages(root);
       assert.deepEqual(
-        pages.map((p) => p.route),
+        pages.map((page) => page.route),
         ["/", "/about", "/blog", "/blog/post"]
       );
       assert.deepEqual(
-        pages.map((p) => p.outRel),
-        ["index.html", "about.html", path.posix.join("blog", "index.html"), path.posix.join("blog", "post.html")]
+        pages.map((page) => page.outRel),
+        ["index.html", "about.html", "blog/index.html", "blog/post.html"]
       );
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  test("legacy mode: standalone src/*.html pages still work", async () => {
-    const tmp = await makeLegacyApp();
+  test("missing pages/ throws with the expected entry path", async () => {
+    const root = await makeApp({ pages: {} });
     try {
-      const { mode, pages } = await discoverPages(tmp);
-      assert.equal(mode, "legacy");
-      assert.deepEqual(pages.map((p) => p.route), ["/", "/about"]);
+      await assert.rejects(
+        () => discoverPages(root),
+        /No pages found in .*pages.*pages\/index\.chjs/
+      );
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  test("existing single-page fixtures stay in legacy mode", async () => {
-    const { mode, pages } = await discoverPages(FIXTURE_BASIC);
-    assert.equal(mode, "legacy");
-    assert.deepEqual(pages.map((p) => p.route), ["/"]);
-  });
-
-  test("pages/ without app.html throws", async () => {
-    const tmp = await makeLayoutApp();
-    try {
-      await fs.rm(path.join(tmp, "src", "app.html"));
-      await assert.rejects(() => discoverPages(tmp), /app\.html.*missing/);
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("app.html without pages/ throws", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-noapp-"));
-    try {
-      await fs.mkdir(path.join(tmp, "src", "lib"), { recursive: true });
-      await fs.writeFile(path.join(tmp, "src", "app.html"), LAYOUT_HTML);
-      await assert.rejects(() => buildMultipageGraph(tmp), /No pages found/);
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("layout without body slot throws", async () => {
-    const tmp = await makeLayoutApp();
-    try {
-      await fs.writeFile(path.join(tmp, "src", "app.html"), "<html><body><app></app></body></html>");
-      await assert.rejects(() => buildMultipageGraph(tmp), new RegExp(`<${BODY_SLOT_TAG}>`));
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("layout with two body slots throws", async () => {
-    const tmp = await makeLayoutApp();
+  test("legacy src/index.html throws the removed single-page error", async () => {
+    const root = await makeApp({ pages: {} });
     try {
       await fs.writeFile(
-        path.join(tmp, "src", "app.html"),
-        `<html><body><${BODY_SLOT_TAG} /><${BODY_SLOT_TAG} /></body></html>`
+        path.join(root, "src", "index.html"),
+        "<html><body><app></app></body></html>"
       );
-      await assert.rejects(() => buildMultipageGraph(tmp), /exactly one/);
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("layout with <app> throws (replaced by body slot)", async () => {
-    const tmp = await makeLayoutApp();
-    try {
-      await fs.writeFile(
-        path.join(tmp, "src", "app.html"),
-        `<html><body><app><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></app></body></html>`
+      await assert.rejects(
+        () => discoverPages(root),
+        /removed legacy single-page mode/
       );
-      await assert.rejects(() => buildMultipageGraph(tmp), /must not contain <app>/);
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  test("duplicate routes (about.html + about/index.html) throw", async () => {
-    const tmp = await makeLayoutApp();
+  test(".html pages throw instead of being auto-wrapped", async () => {
+    const root = await makeApp({
+      pages: { "index.chjs": SIMPLE_INDEX, "about.html": "<main>About</main>" },
+    });
     try {
-      await fs.mkdir(path.join(tmp, "src", "pages", "about"), { recursive: true });
-      await fs.writeFile(path.join(tmp, "src", "pages", "about", "index.html"), "<main>dup</main>");
-      await assert.rejects(() => buildMultipageGraph(tmp), /Duplicate route \/about/);
+      await assert.rejects(
+        () => discoverPages(root),
+        /uses \.html, but pages must be \.chjs files/
+      );
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  test("underscore files/dirs are ignored", async () => {
-    const tmp = await makeLayoutApp();
+  test("duplicate routes throw", async () => {
+    const root = await makeApp({
+      pages: {
+        "index.chjs": SIMPLE_INDEX,
+        "about.chjs": `<template><main>About</main></template>`,
+        "about/index.chjs": `<template><main>Duplicate</main></template>`,
+      },
+    });
     try {
-      await fs.writeFile(path.join(tmp, "src", "pages", "_draft.html"), "<main>draft</main>");
-      await fs.mkdir(path.join(tmp, "src", "pages", "_partials"), { recursive: true });
-      await fs.writeFile(path.join(tmp, "src", "pages", "_partials", "x.html"), "<main>x</main>");
-      const { pages } = await discoverPages(tmp);
+      await assert.rejects(
+        () => discoverPages(root),
+        /Duplicate route \/about/
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("underscore files and directories are ignored", async () => {
+    const root = await makeMultipageApp();
+    try {
+      await writePage(root, "_draft.chjs", "<template><div>draft</div></template>");
+      await writePage(root, "_partials/x.chjs", "<template><div>x</div></template>");
+      const pages = await discoverPages(root);
       assert.deepEqual(
-        pages.map((p) => p.route),
+        pages.map((page) => page.route),
         ["/", "/about", "/blog", "/blog/post"]
       );
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the pages root must define /", async () => {
+    const root = await makeApp({
+      pages: { "about.chjs": `<template><main>About</main></template>` },
+    });
+    try {
+      await assert.rejects(
+        () => discoverPages(root),
+        /Missing .*pages\/index\.chjs/
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 });
 
-describe("routing — graph + render", () => {
-  test("layout graph registers pages as components, keeps page compat", async () => {
-    const tmp = await makeLayoutApp();
+describe("routing — site state", () => {
+  let parent;
+  let root;
+  let state;
+
+  before(async () => {
+    parent = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-state-"));
+    root = path.join(parent, "app");
+    await fs.cp(FIXTURE_BASIC, root, { recursive: true });
+    state = await buildSiteState(root);
+  });
+
+  after(async () => {
+    if (parent) await fs.rm(parent, { recursive: true, force: true });
+  });
+
+  test("builds one graph per page, a route table and a graph mirror", async () => {
+    assert.ok(state.pages instanceof Map);
+    assert.deepEqual([...state.pages.keys()], ["/"]);
+    const page = state.pages.get("/");
+    assert.equal(page.route, "/");
+    assert.equal(page.outRel, "index.html");
+    assert.equal(page.graph.root.id, "pages/index.chjs");
+    assert.ok(page.graph.modules.has("lib/greeting.chjs"));
+    assert.ok(!page.graph.modules.has("lib/unused.chjs"));
+
+    assert.deepEqual(
+      [...state.routeTable.keys()].sort(),
+      ["/", "/index", "/index.html"]
+    );
+
+    const mirrorPage = await fs.readFile(
+      path.join(state.graphRoot, "pages", "index.chjs"),
+      "utf-8"
+    );
+    assert.ok(!mirrorPage.includes(HEAD_SLOT_TAG));
+    assert.ok(mirrorPage.includes("<main>"));
+    assert.ok(
+      await fs
+        .stat(path.join(state.graphRoot, "lib", "unused.chjs"))
+        .then(() => true)
+    );
+    assert.ok(!page.graph.modules.has("lib/unused.chjs"));
+  });
+
+  test("one graph object per page is reused for the life of the state", async () => {
+    const page = state.pages.get("/");
+    const graph = page.graph;
+    await renderRoute(state, "/");
+    await renderRoute(state, "/", { title: "Again" });
+    assert.equal(state.pages.get("/").graph, graph);
+    assert.equal(state.pages.get("/").graph.root, graph.root);
+  });
+
+  test("multipage state builds distinct graphs with matching page routes", async () => {
+    const multiRoot = await makeMultipageApp();
     try {
-      const graph = await buildMultipageGraph(tmp);
-      assert.equal(graph.mode, "layout");
-      assert.ok(graph.layoutSource.includes(BODY_SLOT_TAG));
-      assert.equal(graph.pages.size, 4);
-      assert.ok(graph.page, "graph.page must exist for backwards compat");
-      assert.equal(graph.page.route, "/");
-      for (const page of graph.pages.values()) {
-        assert.ok(page.compName, "layout pages are components");
-        assert.ok(graph.loadedComponents.has(page.compName));
+      const multi = await buildSiteState(multiRoot);
+      assert.deepEqual([...multi.pages.keys()], [
+        "/",
+        "/about",
+        "/blog",
+        "/blog/post",
+      ]);
+      for (const [route, page] of multi.pages) {
+        assert.equal(page.route, route);
+        assert.equal(page.graph.entry, page.entry);
       }
+      assert.notEqual(
+        multi.pages.get("/").graph,
+        multi.pages.get("/about").graph
+      );
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(multiRoot, { recursive: true, force: true });
     }
   });
 
-  test("renderRoute renders each page inside the layout", async () => {
-    const tmp = await makeLayoutApp();
+  test("a missing app.html throws with the expected path and no fallback", async () => {
+    const noShell = await makeApp({ appHtml: null });
     try {
-      const graph = await buildMultipageGraph(tmp);
-      const home = await renderRoute(graph, "/", { name: "Alice" });
-      assert.ok(home.html.includes("NAV") && home.html.includes("FOOT"), "layout chrome");
-      assert.ok(home.html.includes("Home Alice"), "page content with ctx prop");
-      assert.ok(!home.html.includes(BODY_SLOT_TAG), "slot consumed");
-      assert.ok(home.html.includes("<title>Home | Alice</title>"), "page head with ctx");
-      assert.ok(home.html.includes('<meta name="description" content="Welcome Alice">'));
-      assert.ok(!home.html.includes(HEAD_SLOT_TAG), "head slot consumed");
+      await assert.rejects(
+        () => buildSiteState(noShell),
+        /Missing document shell at .*app\.html/
+      );
+    } finally {
+      await fs.rm(noShell, { recursive: true, force: true });
+    }
+  });
 
-      const about = await renderRoute(graph, "/about");
-      assert.ok(about.html.includes("NAV") && about.html.includes("About page"));
-      assert.ok(about.html.includes("<title>About | Site</title>"), "per-page title");
+  test("pages/index.chjs is the entry point; bundle.entry is ignored", async () => {
+    const rootWithEntry = await makeApp({
+      config: {
+        bundle: { srcDir: "src", outDir: "dist", entry: "src/index.html" },
+      },
+    });
+    try {
+      const built = await buildSiteState(rootWithEntry);
+      assert.ok(built.pages.has("/"));
+      assert.equal(built.pages.get("/").entry, "pages/index.chjs");
+    } finally {
+      await fs.rm(rootWithEntry, { recursive: true, force: true });
+    }
+  });
 
-      const blog = await renderRoute(graph, "/blog/");
+  test("non-page .chjs modules cannot contain chocolakit directives", async () => {
+    const badLib = await makeApp({
+      lib: {
+        "widget.chjs": `<${HEAD_SLOT_TAG}><title>No</title></${HEAD_SLOT_TAG}><template><div>no</div></template>`,
+      },
+    });
+    try {
+      await assert.rejects(
+        () => buildSiteState(badLib),
+        /only allowed in page entries/
+      );
+    } finally {
+      await fs.rm(badLib, { recursive: true, force: true });
+    }
+  });
+
+  test("page <app> is rejected", async () => {
+    const appPage = await makeApp({
+      pages: { "index.chjs": `<app></app><template><main>Hi</main></template>` },
+    });
+    try {
+      await assert.rejects(
+        () => buildSiteState(appPage),
+        /<app> is no longer supported/
+      );
+    } finally {
+      await fs.rm(appPage, { recursive: true, force: true });
+    }
+  });
+
+  test("shell validation produces clear errors", async () => {
+    const cases = [
+      {
+        name: "no body slot",
+        html: `<html><head><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}></head><body></body></html>`,
+        pattern: /exactly one <chocolakit:body>.*found none/,
+      },
+      {
+        name: "two body slots",
+        html: `<html><head></head><body><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></body></html>`,
+        pattern: /exactly one <chocolakit:body>.*found 2/,
+      },
+      {
+        name: "unclosed body slot",
+        html: `<html><head></head><body><${BODY_SLOT_TAG}></body></html>`,
+        pattern: /unclosed <chocolakit:body> slot/,
+      },
+      {
+        name: "two head slots",
+        html: `<html><head><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}></head><body><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></body></html>`,
+        pattern: /at most one <chocolakit:head>.*found 2/,
+      },
+      {
+        name: "head slot outside head",
+        html: `<html><head></head><body><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></body></html>`,
+        pattern: /<chocolakit:head> must be inside <head>/,
+      },
+      {
+        name: "unclosed head slot",
+        html: `<html><head><${HEAD_SLOT_TAG}></head><body><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></body></html>`,
+        pattern: /unclosed <chocolakit:head> slot/,
+      },
+      {
+        name: "missing </head>",
+        html: `<html><head><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}><body><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></body></html>`,
+        pattern: /closing <\/head>/,
+      },
+      {
+        name: "missing </body>",
+        html: `<html><head><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}></head><body><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></html>`,
+        pattern: /closing <\/body>/,
+      },
+      {
+        name: "<app>",
+        html: `<html><head></head><body><app><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></app></body></html>`,
+        pattern: /<app> is no longer supported in app\.html/,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const shellRoot = await makeApp({ appHtml: testCase.html });
+      try {
+        await assert.rejects(
+          () => buildSiteState(shellRoot),
+          testCase.pattern,
+          testCase.name
+        );
+      } finally {
+        await fs.rm(shellRoot, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+describe("routing — renderRoute", () => {
+  let parent;
+  let root;
+  let state;
+
+  before(async () => {
+    parent = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-render-"));
+    root = path.join(parent, "app");
+    await fs.cp(FIXTURE_BASIC, root, { recursive: true });
+    state = await buildSiteState(root);
+  });
+
+  after(async () => {
+    if (parent) await fs.rm(parent, { recursive: true, force: true });
+  });
+
+  test("assembles the page fragment into the required shell", async () => {
+    const result = await renderRoute(state, "/");
+    assert.match(result.html, /^<!doctype html>/i);
+    assert.ok(!result.html.includes(BODY_SLOT_TAG));
+    assert.ok(!result.html.includes(HEAD_SLOT_TAG));
+    assert.ok(!result.html.includes("<app>"));
+    assert.ok(result.html.includes("<main"));
+    assert.ok(result.html.includes("Hello World!"));
+    assert.ok(result.html.includes("slot content"));
+    assert.match(
+      result.html,
+      /<div[^>]*style="display:none"[^>]*>never shown<\/div>/,
+      "false conditionals render hidden"
+    );
+
+    const body = result.html.match(/<body>([\s\S]*?)<\/body>/i)?.[1] ?? "";
+    assert.ok(body.includes("<main"), "page fragment must live in the shell body");
+    assert.ok(!result.html.includes("chocolakit:"));
+  });
+
+  test("extracts, interpolates and inserts the page head", async () => {
+    const defaults = await renderRoute(state, "/");
+    assert.equal(
+      defaults.head,
+      `<title>Fixture</title>\n  <meta name="description" content="Fixture page for Fixture" />`
+    );
+    const head = defaults.html.match(/<head>([\s\S]*?)<\/head>/i)?.[1] ?? "";
+    assert.ok(head.includes("<title>Fixture</title>"));
+    assert.ok(head.includes('content="Fixture page for Fixture"'));
+
+    const custom = await renderRoute(state, "/", { title: "Override" });
+    assert.ok(custom.html.includes("<title>Override</title>"));
+    assert.ok(custom.html.includes('content="Fixture page for Override"'));
+
+    const body = custom.html.match(/<body>([\s\S]*?)<\/body>/i)?.[1] ?? "";
+    assert.ok(!body.includes("<title>"), "head must not leak into the body");
+  });
+
+  test("routes without a page head report head null and add no title", async () => {
+    const multiRoot = await makeMultipageApp();
+    try {
+      const multi = await buildSiteState(multiRoot);
+      const blog = await renderRoute(multi, "/blog");
+      assert.equal(blog.head, null);
+      const head = blog.html.match(/<head>([\s\S]*?)<\/head>/i)?.[1] ?? "";
+      assert.ok(!head.includes("<title>"));
       assert.ok(blog.html.includes("Blog index"));
-      const blogHead = blog.html.match(/<head>([\s\S]*?)<\/head>/i)?.[1] ?? "";
-      assert.ok(!blogHead.includes("<title>"), "pages without head add no title");
+    } finally {
+      await fs.rm(multiRoot, { recursive: true, force: true });
+    }
+  });
 
-      const post = await renderRoute(graph, "/blog/post.html");
+  test("multipage routes serve the correct page and head", async () => {
+    const multiRoot = await makeMultipageApp();
+    try {
+      const multi = await buildSiteState(multiRoot);
+
+      const home = await renderRoute(multi, "/", { title: "Alice" });
+      assert.ok(home.html.includes("Home"));
+      assert.ok(home.html.includes("<title>Alice | Site</title>"));
+      assert.ok(home.html.includes("Hello World!"));
+
+      const about = await renderRoute(multi, "/about");
+      assert.ok(about.html.includes("About page"));
+      assert.ok(about.html.includes("<title>About | Site</title>"));
+      assert.ok(!about.html.includes("Alice | Site"));
+
+      const blog = await renderRoute(multi, "/blog/");
+      assert.ok(blog.html.includes("Blog index"));
+
+      const post = await renderRoute(multi, "/blog/post.html");
       assert.ok(post.html.includes("Post page"));
 
-      await assert.rejects(() => renderRoute(graph, "/nope"), /No route found/);
+      await assert.rejects(() => renderRoute(multi, "/nope"), /No route found/);
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(multiRoot, { recursive: true, force: true });
     }
   });
 
-  test("page head never leaks into body", async () => {
-    const tmp = await makeLayoutApp();
+  test("matchRoute handles clean, trailing slash and .html aliases", async () => {
+    const multiRoot = await makeMultipageApp();
     try {
-      const graph = await buildMultipageGraph(tmp);
-      const home = await renderRoute(graph, "/", { name: "Alice" });
-      const body = home.html.match(/<body>([\s\S]*?)<\/body>/i)?.[1] ?? "";
-      assert.ok(!body.includes("<title>"), "title must render in head only");
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("layout without head slot ignores page head with warning", async () => {
-    const tmp = await makeLayoutApp();
-    try {
-      await fs.writeFile(
-        path.join(tmp, "src", "app.html"),
-        `<!DOCTYPE html><html><head><title>Site</title></head><body><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></body></html>`
-      );
-      const graph = await buildMultipageGraph(tmp);
-      const warns = [];
-      const origWarn = console.warn;
-      console.warn = (...args) => warns.push(args.join(" "));
-      try {
-        const home = await renderRoute(graph, "/");
-        assert.ok(home.html.includes("<title>Site</title>"), "layout head preserved");
-        assert.ok(!home.html.includes("Home |"), "page head ignored without slot");
-      } finally {
-        console.warn = origWarn;
-      }
-      assert.ok(warns.some((w) => w.includes(HEAD_SLOT_TAG)), `expected head warning, got ${warns}`);
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("layout pages use shared lib components", async () => {
-    const tmp = await makeLayoutApp();
-    try {
-      await fs.writeFile(
-        path.join(tmp, "src", "pages", "index.html"),
-        `<template><main><Greeting name="{name}" /></main></template>`
-      );
-      const graph = await buildMultipageGraph(tmp);
-      const home = await renderRoute(graph, "/", { name: "Bob" });
-      assert.ok(home.html.includes("Hello Bob!"));
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("matchRoute handles trailing slash and .html aliases", async () => {
-    const tmp = await makeLayoutApp();
-    try {
-      const graph = await buildMultipageGraph(tmp);
-      const table = buildRouteTable(graph);
+      const multi = await buildSiteState(multiRoot);
+      const table = buildRouteTable(multi);
       assert.ok(matchRoute(table, "/about"));
       assert.ok(matchRoute(table, "/about/"));
       assert.ok(matchRoute(table, "/about.html"));
       assert.ok(matchRoute(table, "/blog"));
       assert.ok(matchRoute(table, "/blog/index.html"));
       assert.equal(matchRoute(table, "/nope-xyz"), null);
+      assert.ok(matchRoute(multi, "/about"), "state.routeTable is reused");
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(multiRoot, { recursive: true, force: true });
     }
   });
-});
 
-describe("routing — emitMultipage", () => {
-  test("layout emit strips pages/ prefix, keeps structure", async () => {
-    const tmp = await makeLayoutApp();
+  test("shell without a head slot appends page head with one warning per state", async () => {
+    const noHeadRoot = await makeApp({
+      appHtml: SHELL_WITHOUT_HEAD_SLOT,
+      pages: {
+        "index.chjs": `<${HEAD_SLOT_TAG}><title>Page</title></${HEAD_SLOT_TAG}><template><main>Home</main></template>`,
+      },
+    });
     try {
-      const graph = await buildMultipageGraph(tmp);
-      await emitMultipage(graph);
-      const outDir = path.join(tmp, "dist");
-      for (const rel of ["index.html", "about.html", path.join("blog", "index.html"), path.join("blog", "post.html")]) {
-        const html = await fs.readFile(path.join(outDir, rel), "utf-8");
-        assert.ok(html.includes("NAV"), `${rel} should render inside layout`);
-      }
-      const entries = await fs.readdir(outDir);
-      assert.ok(!entries.includes("pages"), "pages/ prefix must not leak into dist");
-      assert.ok(!entries.includes("app.html"), "layout itself is not emitted as a page");
-      const about = await fs.readFile(path.join(outDir, "about.html"), "utf-8");
-      assert.ok(about.includes("About page"));
+      const noHeadState = await buildSiteState(noHeadRoot);
+      let first;
+      const warns = await captureWarnings(async () => {
+        first = await renderRoute(noHeadState, "/");
+        await renderRoute(noHeadState, "/");
+      });
+      assert.ok(first.html.includes("<title>Page</title>"));
+      assert.ok(!first.html.includes(HEAD_SLOT_TAG));
+      assert.equal(
+        warns.filter((warning) => warning.includes(HEAD_SLOT_TAG)).length,
+        1
+      );
     } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
+      await fs.rm(noHeadRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("scoped CSS is content-hashed and global styles stay author-managed", async () => {
+    const result = await renderRoute(state, "/");
+    const name = `sc-${deterministicHash(result.styles, 6)}.css`;
+    assert.ok(result.html.includes(`href="/${name}"`));
+    assert.ok(result.styles.includes(".greeting[data-sc-"));
+    assert.ok(!result.styles.includes("background: #fafaf8"));
+    assert.ok(result.html.includes('href="/styles.css"'));
+    assert.ok(result.html.includes('href="https://fonts.example.com/font.css"'));
+  });
+
+  test("runtime tags are ESM, ordered after core, and hydration is last", async () => {
+    const result = await renderRoute(state, "/");
+    const tags = [
+      ...result.html.matchAll(/<script type="module" src="\/([^"]+)"><\/script>/g),
+    ].map((match) => match[1]);
+    assert.deepEqual(tags, result.runtime.map((chunk) => chunk.name));
+    assert.ok(tags.length >= 3);
+    const hydration = result.runtime.at(-1);
+    assert.ok(hydration.content.includes("DOMContentLoaded"));
+    assert.equal(
+      result.runtime.filter((chunk) => chunk.content.includes("DOMContentLoaded"))
+        .length,
+      1
+    );
+  });
+
+  test("non-.chjs imports are rewritten to /<src-relative> URLs", async () => {
+    const result = await renderRoute(state, "/");
+    const counterChunk = result.runtime.find((chunk) =>
+      chunk.content.includes("formatCount")
+    );
+    assert.ok(counterChunk, "counter chunk present");
+    assert.ok(counterChunk.content.includes('from "/lib/format.js"'));
+    assert.ok(!counterChunk.content.includes('from "./format.js"'));
+    assert.ok(
+      await fs
+        .stat(path.join(root, "src", "lib", "format.js"))
+        .then((stat) => stat.isFile())
+    );
+  });
+
+  test("generated ./run-*.js imports stay untouched", async () => {
+    const result = await renderRoute(state, "/");
+    const moduleChunks = result.runtime.filter((chunk) =>
+      chunk.content.includes('from "./run-')
+    );
+    assert.ok(moduleChunks.length > 0);
+    for (const chunk of moduleChunks) {
+      assert.ok(!chunk.content.includes('from "/run-'));
+    }
+  });
+
+  test("query and hash suffixes are preserved when rewriting", async () => {
+    const suffixRoot = await makeApp({
+      pages: {
+        "index.chjs": `<script>
+  import "../lib/format.js?raw#frag";
+</script>
+<template><main>Suffix</main></template>`,
+      },
+      lib: { "format.js": "export const ok = true;\n" },
+    });
+    try {
+      const suffixState = await buildSiteState(suffixRoot);
+      const result = await renderRoute(suffixState, "/");
+      const chunk = result.runtime.find((entry) =>
+        entry.content.includes("format.js?raw#frag")
+      );
+      assert.ok(chunk, "import preserved");
+      assert.ok(chunk.content.includes('import "/lib/format.js?raw#frag"'));
+    } finally {
+      await fs.rm(suffixRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("warns once per state for bare and escaping imports", async () => {
+    const warnRoot = await makeApp({
+      pages: {
+        "index.chjs": `<script>
+  import "lodash";
+  import "../../outside.js";
+</script>
+<template><main>Warnings</main></template>`,
+      },
+    });
+    try {
+      const warnState = await buildSiteState(warnRoot);
+      const warns = await captureWarnings(async () => {
+        await renderRoute(warnState, "/");
+        await renderRoute(warnState, "/");
+      });
+      assert.equal(
+        warns.filter((warning) => warning.includes('bare import "lodash"')).length,
+        1
+      );
+      assert.equal(
+        warns.filter((warning) => warning.includes("escapes srcDir")).length,
+        1
+      );
+    } finally {
+      await fs.rm(warnRoot, { recursive: true, force: true });
     }
   });
 });
 
-describe("routing — server SSR", () => {
-  let tmp;
-  let server;
-  let baseUrl;
+describe("routing — emitSite", () => {
+  let parent;
+  let root;
+  let state;
 
   before(async () => {
-    tmp = await makeLayoutApp();
-    const handler = await createHandler(tmp);
-    server = http.createServer(handler);
-    await new Promise((res, rej) => {
-      server.once("error", rej);
-      server.listen(0, "127.0.0.1", res);
-    });
-    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    parent = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-emit-"));
+    root = path.join(parent, "app");
+    await fs.cp(FIXTURE_BASIC, root, { recursive: true });
+    state = await buildSiteState(root);
   });
 
   after(async () => {
-    if (server) await new Promise((r) => server.close(r));
-    if (tmp) await fs.rm(tmp, { recursive: true, force: true });
+    if (parent) await fs.rm(parent, { recursive: true, force: true });
   });
 
-  test("each route SSRs its page inside the layout", async () => {
-    const home = await httpGet(baseUrl, "/");
-    assert.equal(home.status, 200);
-    assert.ok(home.text.includes("NAV") && home.text.includes("Home"));
+  test("emits routes, scoped CSS, runtime chunks and copied assets", async () => {
+    const emitted = await emitSite(state);
+    const outDir = path.join(root, "dist");
 
-    const about = await httpGet(baseUrl, "/about");
-    assert.equal(about.status, 200);
-    assert.ok(about.text.includes("NAV") && about.text.includes("About page"));
+    assert.ok((await listDir(outDir)).includes("index.html"));
+    assert.ok(emitted.files.some((file) => /^sc-[a-z0-9]+\.css$/.test(file.path)));
+    assert.ok(emitted.files.some((file) => /^run-[a-z0-9]+\.js$/.test(file.path)));
+    assert.ok(emitted.copies.some((copy) => copy.relative === "static"));
+    assert.ok(emitted.copies.some((copy) => copy.relative === "styles.css"));
+    assert.ok(emitted.copies.some((copy) => copy.relative === "lib/format.js"));
+    assert.ok(!emitted.copies.some((copy) => copy.relative === "app.html"));
+    assert.ok(!emitted.copies.some((copy) => copy.relative.endsWith(".chjs")));
 
-    const aboutSlash = await httpGet(baseUrl, "/about/");
-    assert.equal(aboutSlash.status, 200);
-    assert.ok(aboutSlash.text.includes("About page"));
-
-    const aboutHtml = await httpGet(baseUrl, "/about.html");
-    assert.equal(aboutHtml.status, 200);
-    assert.ok(aboutHtml.text.includes("About page"));
-
-    const blog = await httpGet(baseUrl, "/blog");
-    assert.equal(blog.status, 200);
-    assert.ok(blog.text.includes("Blog index"));
-
-    const post = await httpGet(baseUrl, "/blog/post");
-    assert.equal(post.status, 200);
-    assert.ok(post.text.includes("Post page"));
+    assert.ok((await listDir(path.join(outDir, "static"))).includes("hello.txt"));
+    assert.ok((await listDir(path.join(outDir, "lib"))).includes("format.js"));
+    assert.ok((await listDir(outDir)).includes("favicon.ico"));
+    assert.ok(!(await listDir(outDir)).includes("app.html"));
+    assert.ok(!(await listDir(outDir)).includes("pages"));
   });
 
-  test("per-request query ctx applies to layout pages", async () => {
-    const res = await httpGet(baseUrl, "/?name=Alice");
-    assert.equal(res.status, 200);
-    assert.ok(res.text.includes("Home Alice"), `got ${res.text.slice(0, 300)}`);
+  test("writes .chocola/hashes.json with module-id keys", async () => {
+    const emitted = await emitSite(state);
+    const file = path.join(root, ".chocola", "hashes.json");
+    const text = await fs.readFile(file, "utf-8");
+    assert.ok(text.endsWith("\n"));
+    const hashes = JSON.parse(text);
+    assert.deepEqual(hashes, emitted.hashMap);
+    assert.deepEqual(Object.keys(hashes), [
+      "lib/action.chjs",
+      "lib/card.chjs",
+      "lib/counter.chjs",
+      "lib/greeting.chjs",
+      "pages/index.chjs",
+    ]);
+    assert.equal(hashes["lib/greeting.chjs"], deterministicHash("lib/greeting.chjs", 8));
   });
 
-  test("SSR head is per-page with ctx interpolation", async () => {
-    const home = await httpGet(baseUrl, "/?name=Alice");
-    const homeHead = home.text.match(/<head>([\s\S]*?)<\/head>/i)?.[1] ?? "";
-    assert.ok(homeHead.includes("<title>Home | Alice</title>"), `got ${homeHead.slice(0, 200)}`);
+  test("emptyOutDir clears stale files by default", async () => {
+    const outDir = path.join(root, "dist");
+    await fs.mkdir(outDir, { recursive: true });
+    await fs.writeFile(path.join(outDir, "stale.txt"), "stale");
 
-    const about = await httpGet(baseUrl, "/about");
-    const aboutHead = about.text.match(/<head>([\s\S]*?)<\/head>/i)?.[1] ?? "";
-    assert.ok(aboutHead.includes("<title>About | Site</title>"));
-    assert.ok(!aboutHead.includes("Home |"), "heads must not leak across routes");
+    await emitSite(state);
+    assert.ok(!(await listDir(outDir)).includes("stale.txt"));
   });
 
-  test("unknown route still 404s", async () => {
-    const res = await httpGet(baseUrl, "/unknown-xyz-123");
-    assert.equal(res.status, 404);
-  });
-
-  test("legacy single-page fixture still serves / /index /index.html", async () => {
-    const handler = await createHandler(FIXTURE_SERVER);
-    const srv = http.createServer(handler);
-    await new Promise((res, rej) => {
-      srv.once("error", rej);
-      srv.listen(0, "127.0.0.1", res);
+  test("emptyOutDir false preserves stale files", async () => {
+    const keepRoot = await makeApp({
+      config: { bundle: { srcDir: "src", outDir: "dist", emptyOutDir: false } },
     });
-    const base = `http://127.0.0.1:${srv.address().port}`;
     try {
-      for (const p of ["/", "/index", "/index.html"]) {
-        const res = await httpGet(base, p);
-        assert.equal(res.status, 200, p);
-      }
+      const keepState = await buildSiteState(keepRoot);
+      const outDir = path.join(keepRoot, "dist");
+      await fs.mkdir(outDir, { recursive: true });
+      await fs.writeFile(path.join(outDir, "stale.txt"), "keep");
+      await emitSite(keepState);
+      assert.ok((await listDir(outDir)).includes("stale.txt"));
+      assert.ok((await listDir(outDir)).includes("index.html"));
     } finally {
-      await new Promise((r) => srv.close(r));
+      await fs.rm(keepRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("generated files win collisions with author assets", async () => {
+    const collisionRoot = await makeApp();
+    try {
+      const collisionState = await buildSiteState(collisionRoot);
+      const first = await renderRoute(collisionState, "/");
+      const runtimeName = first.runtime.at(-1).name;
+      const generated = first.runtime.at(-1).content;
+      await fs.writeFile(
+        path.join(collisionRoot, "src", runtimeName),
+        "AUTHOR COLLISION"
+      );
+
+      const rebuilt = await buildSiteState(collisionRoot);
+      await emitSite(rebuilt);
+      const written = await fs.readFile(
+        path.join(collisionRoot, "dist", runtimeName),
+        "utf-8"
+      );
+      assert.equal(written, generated);
+    } finally {
+      await fs.rm(collisionRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("emitSite and assembleDocument require a valid state", async () => {
+    await assert.rejects(() => emitSite(null), /requires a site state/);
+    assert.throws(
+      () => assembleDocument({ state: null }),
+      /requires a state with a loaded document shell/
+    );
+  });
+});
+
+describe("routing — assembleDocument", () => {
+  test("inserts head, scoped CSS, body and runtime in the documented order", () => {
+    const shellState = {
+      shell: {
+        source: `<html><head><${HEAD_SLOT_TAG}></${HEAD_SLOT_TAG}></head><body><${BODY_SLOT_TAG}></${BODY_SLOT_TAG}></body></html>`,
+        headSlot: true,
+        file: "app.html",
+      },
+    };
+    const html = assembleDocument({
+      state: shellState,
+      page: { headSource: "<title>T</title>", graph: { root: { compProps: [] } } },
+      result: {
+        html: "<main>Body</main>",
+        styles: ".x{color:red}",
+        runtime: [{ name: "run-aaaaaa.js" }, { name: "run-bbbbbb.js" }],
+      },
+      head: "<title>T</title>",
+    });
+
+    assert.match(html, /^<!doctype html>/i);
+    assert.ok(html.includes("<title>T</title>"));
+    const scoped = `sc-${deterministicHash(".x{color:red}", 6)}.css`;
+    assert.ok(html.indexOf(scoped) > html.indexOf("<title>T</title>"));
+    assert.ok(html.indexOf(scoped) < html.indexOf("</head>"));
+    assert.ok(html.includes("<main>Body</main>"));
+    assert.ok(!html.includes(BODY_SLOT_TAG));
+    assert.ok(html.indexOf("run-aaaaaa.js") < html.indexOf("run-bbbbbb.js"));
+    assert.ok(html.indexOf("run-bbbbbb.js") < html.indexOf("</body>"));
+  });
+});
+
+describe("routing — RuntimeStore", () => {
+  test("stores chunks in memory, falls back to disk, and clears", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-store-"));
+    try {
+      const store = new RuntimeStore(root, { memoryLimit: 1 });
+      const names = await store.add([
+        { name: "a.js", content: "A" },
+        { name: "b.js", content: "B" },
+      ]);
+      assert.deepEqual(names, ["a.js", "b.js"]);
+      assert.ok(store.has("a.js"));
+      assert.ok(store.has("b.js"));
+      assert.equal(await store.get("a.js"), "A");
+      assert.equal(await store.get("b.js"), "B");
+      assert.ok(
+        await fs.stat(path.join(root, ".chocola", "runtime", "a.js")).then((s) => s.isFile())
+      );
+
+      const target = path.join(root, "written");
+      const written = await store.writeTo(target);
+      assert.deepEqual(written, ["a.js", "b.js"]);
+      assert.equal(await fs.readFile(path.join(target, "b.js"), "utf-8"), "B");
+
+      await store.clear();
+      assert.equal(store.has("a.js"), false);
+      assert.equal(await store.get("a.js"), null);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects traversal and invalid runtime names", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-store-bad-"));
+    try {
+      const store = new RuntimeStore(root);
+      for (const bad of ["../a.js", "a/b.js", "..", "."]) {
+        await assert.rejects(
+          () => store.get(bad),
+          /Invalid runtime file name/
+        );
+        await assert.rejects(
+          () => store.add([{ name: bad, content: "x" }]),
+          /Invalid runtime file name/
+        );
+        assert.equal(store.has(bad), false);
+      }
+      await assert.rejects(() => store.get(""), /Invalid runtime file name/);
+      assert.equal(store.has(""), false);
+      assert.deepEqual(await store.add([{ name: "", content: "x" }]), []);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("writeHashMap sorts keys and adds a trailing newline", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "chocola-hash-"));
+    try {
+      await writeHashMap(
+        { rootDir: root },
+        { "b.chjs": "22222222", "a.chjs": "11111111" }
+      );
+      const text = await fs.readFile(path.join(root, ".chocola", "hashes.json"), "utf-8");
+      assert.equal(
+        text,
+        `{\n  "a.chjs": "11111111",\n  "b.chjs": "22222222"\n}\n`
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 });

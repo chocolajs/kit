@@ -1,0 +1,137 @@
+<script>
+  export let title = "Contact — Cacao & Crumb";
+  export let description =
+    "Book a tasting, ask about an order, or tell us what you think of the citrus bar.";
+  export let sent = "";
+  export let error = "";
+  export let name = "";
+  export let email = "";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/contact" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="eyebrow">Say hello</p>
+    <h1>Contact</h1>
+    <p class="lead">
+      Questions about an order, a wholesale enquiry, or a tasting booking? Send a note
+      and a person will reply, usually within two business days.
+    </p>
+
+    <p class="banner" if="{sent === '1'}">
+      Thanks — your message is in the queue. We will reply to the email you gave us.
+    </p>
+    <p class="banner banner--error" if="{error === 'validation'}">
+      Please add your name, a valid email address, and a message.
+    </p>
+    <p class="banner banner--error" if="{error === 'payload'}">
+      That message was too long to send. Please trim it and try again.
+    </p>
+
+    <div class="contact-layout">
+      <form class="form-card" action="/contact" method="post">
+        <div class="field">
+          <label for="contact-name">Name</label>
+          <input id="contact-name" name="name" type="text" autocomplete="name" required value="{name}" />
+        </div>
+        <div class="field">
+          <label for="contact-email">Email</label>
+          <input id="contact-email" name="email" type="email" autocomplete="email" required value="{email}" />
+        </div>
+        <div class="field">
+          <label for="contact-topic">Topic</label>
+          <select id="contact-topic" name="topic">
+            <option value="order">An order</option>
+            <option value="tasting">Tasting booking</option>
+            <option value="wholesale">Wholesale</option>
+            <option value="other">Something else</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="contact-message">Message</label>
+          <textarea id="contact-message" name="message" rows="6" required></textarea>
+        </div>
+        <div class="button-row">
+          <button class="btn" type="submit">Send message</button>
+        </div>
+        <p class="field__hint">
+          This sample form posts to the server middleware and redirects back here. It
+          is not connected to an email service.
+        </p>
+      </form>
+
+      <aside class="contact-aside">
+        <h2>Find us</h2>
+        <address>
+          214 SE Ash Street<br />
+          Portland, OR 97214
+        </address>
+        <p><a href="mailto:hello@cacaoandcrumb.example">hello@cacaoandcrumb.example</a></p>
+        <p class="muted">(503) 555-0148</p>
+
+        <h2>Counter hours</h2>
+        <dl class="hours">
+          <dt>Thursday–Friday</dt><dd>10am – 5pm</dd>
+          <dt>Saturday</dt><dd>10am – 5pm</dd>
+          <dt>Sunday</dt><dd>11am – 4pm</dd>
+          <dt>Monday–Wednesday</dt><dd>Closed</dd>
+        </dl>
+      </aside>
+    </div>
+  </main>
+</template>
+<style>
+  .contact-layout {
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr;
+    gap: 2.5rem;
+    align-items: start;
+  }
+
+  .contact-aside {
+    padding: 1.5rem;
+    border: 1px solid #e2d2c0;
+    border-radius: 18px;
+    background: #f3e9dc;
+  }
+
+  .contact-aside h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1.1rem;
+  }
+
+  .contact-aside h2 + p,
+  .contact-aside address {
+    margin: 0 0 1.25rem;
+    font-style: normal;
+  }
+
+  .hours {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.35rem 1rem;
+    margin: 0;
+    font-size: 0.92rem;
+  }
+
+  .hours dt {
+    color: #5c463a;
+  }
+
+  .hours dd {
+    margin: 0;
+    text-align: right;
+  }
+
+  @media (max-width: 900px) {
+    .contact-layout {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

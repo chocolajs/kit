@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#2b1a12" />
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
+  <link rel="stylesheet" href="/styles/base.css" />
+  <script type="module" src="/app.js"></script>
+  <chocolakit:head></chocolakit:head>
+</head>
+
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell site-header__inner">
+      <a class="brand" href="/">
+        <span class="brand__mark" aria-hidden="true">C&amp;C</span>
+        <span class="brand__name">Cacao &amp; Crumb</span>
+      </a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="/shop">Shop</a>
+        <a href="/journal">Journal</a>
+        <a href="/about">About</a>
+        <a href="/contact">Contact</a>
+      </nav>
+      <div class="site-header__actions">
+        <a class="account-link" href="/account" aria-label="Account">Account</a>
+        <a class="cart-link" href="/cart">
+          Cart
+          <span class="cart-count" id="cart-count" hidden>0</span>
+        </a>
+      </div>
+    </div>
+  </header>
+  <div id="main">
+    <chocolakit:body></chocolakit:body>
+  </div>
+  <footer class="site-footer">
+    <div class="shell site-footer__inner">
+      <div>
+        <p class="site-footer__brand">Cacao &amp; Crumb</p>
+        <p class="site-footer__note">Bean-to-bar chocolate, made in small batches in Portland, OR.</p>
+      </div>
+      <nav aria-label="Footer">
+        <a href="/shop">Shop</a>
+        <a href="/journal">Journal</a>
+        <a href="/about">About</a>
+        <a href="/contact">Contact</a>
+        <a href="/account">Account</a>
+      </nav>
+      <p class="site-footer__legal">&copy; 2026 Cacao &amp; Crumb. All rights reserved.</p>
+    </div>
+  </footer>
+</body>
+
+</html>

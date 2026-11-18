@@ -1,0 +1,133 @@
+<script>
+  function $runtime(self) {
+    const input = self.querySelector("input[type=search]");
+    const status = self.querySelector("[data-filter-status]");
+    const chips = [...self.querySelectorAll("[data-filter-tag]")];
+    const cards = [...document.querySelectorAll("[data-product-card]")];
+    if (!input) return;
+
+    let activeTag = "all";
+
+    function apply() {
+      const query = input.value.trim().toLowerCase();
+      let visible = 0;
+
+      for (const card of cards) {
+        const haystack = (card.dataset.search || "").toLowerCase();
+        const tagText = haystack;
+        const matchesQuery = !query || haystack.includes(query);
+        const matchesTag = activeTag === "all" || tagText.includes(activeTag);
+        const show = matchesQuery && matchesTag;
+        card.hidden = !show;
+        if (show) visible++;
+      }
+
+      if (status) {
+        status.textContent =
+          visible === 0
+            ? "No bars match that search."
+            : `${visible} ${visible === 1 ? "bar" : "bars"} shown.`;
+      }
+
+      const url = new URL(window.location.href);
+      if (input.value.trim()) url.searchParams.set("q", input.value.trim());
+      else url.searchParams.delete("q");
+      window.history.replaceState(null, "", url);
+    }
+
+    for (const chip of chips) {
+      chip.addEventListener("click", () => {
+        activeTag = chip.dataset.filterTag || "all";
+        for (const other of chips) {
+          other.setAttribute("aria-pressed", String(other === chip));
+        }
+        apply();
+      });
+    }
+
+    input.addEventListener("input", apply);
+
+    const initial = new URL(window.location.href).searchParams.get("q");
+    if (initial) input.value = initial;
+    apply();
+  }
+</script>
+<template>
+  <div class="filter">
+    <label class="visually-hidden" for="shop-search">Search the shop</label>
+    <input
+      id="shop-search"
+      type="search"
+      name="q"
+      placeholder="Search by flavor, origin, or dietary tag"
+      autocomplete="off"
+    />
+    <ul class="chips" aria-label="Filter by category">
+      <li><button type="button" data-filter-tag="all" aria-pressed="true">All</button></li>
+      <li><button type="button" data-filter-tag="dark" aria-pressed="false">Dark</button></li>
+      <li><button type="button" data-filter-tag="milk" aria-pressed="false">Milk</button></li>
+      <li><button type="button" data-filter-tag="vegan" aria-pressed="false">Vegan</button></li>
+      <li><button type="button" data-filter-tag="gift" aria-pressed="false">Gift</button></li>
+    </ul>
+    <p class="filter__status" data-filter-status aria-live="polite"></p>
+  </div>
+</template>
+<style>
+  .filter {
+    margin-bottom: 1.75rem;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  input {
+    width: 100%;
+    padding: 0.7rem 1rem;
+    border: 1px solid #e2d2c0;
+    border-radius: 999px;
+    background: #fffdf9;
+    font: inherit;
+    margin-bottom: 0.85rem;
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .chips button {
+    padding: 0.35rem 0.85rem;
+    border: 1px solid #e2d2c0;
+    border-radius: 999px;
+    background: transparent;
+    color: #5c463a;
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+
+  .chips button[aria-pressed="true"] {
+    background: #2b1a12;
+    border-color: #2b1a12;
+    color: #fbf6ef;
+  }
+
+  .filter__status {
+    margin: 0.75rem 0 0;
+    font-size: 0.88rem;
+    color: #5c463a;
+  }
+</style>

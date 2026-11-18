@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180" role="img" aria-label="Citrus nib chocolate bar">
+  <defs>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7a4a18" />
+      <stop offset="1" stop-color="#3a2009" />
+    </linearGradient>
+  </defs>
+  <ellipse cx="120" cy="154" rx="84" ry="13" fill="#2b1a12" opacity=".15" />
+  <g transform="rotate(3 120 90)">
+    <rect x="32" y="32" width="176" height="112" rx="12" fill="url(#bar)" />
+    <g fill="#5e3711">
+      <rect x="42" y="42" width="48" height="44" rx="5" />
+      <rect x="96" y="42" width="48" height="44" rx="5" />
+      <rect x="150" y="42" width="48" height="44" rx="5" />
+      <rect x="42" y="92" width="48" height="42" rx="5" />
+      <rect x="96" y="92" width="48" height="42" rx="5" />
+      <rect x="150" y="92" width="48" height="42" rx="5" />
+    </g>
+    <g fill="#e0a24a">
+      <path d="M60 98c8-8 16-6 20 2s-4 18-14 16-12-12-6-18Z" />
+      <path d="M118 52c7-7 15-5 18 2s-3 16-12 15-11-11-6-17Z" />
+      <path d="M168 104c8-7 15-5 18 2s-3 15-12 14-11-10-6-16Z" />
+    </g>
+    <g fill="#3a2009">
+      <rect x="48" y="50" width="7" height="5" rx="1.5" />
+      <rect x="66" y="64" width="6" height="4" rx="1.5" />
+      <rect x="104" y="70" width="7" height="5" rx="1.5" />
+      <rect x="128" y="56" width="6" height="4" rx="1.5" />
+      <rect x="158" y="58" width="7" height="5" rx="1.5" />
+      <rect x="174" y="74" width="6" height="4" rx="1.5" />
+      <rect x="52" y="118" width="7" height="5" rx="1.5" />
+      <rect x="108" y="116" width="6" height="4" rx="1.5" />
+      <rect x="162" y="120" width="7" height="5" rx="1.5" />
+    </g>
+    <rect x="32" y="32" width="176" height="112" rx="12" fill="none" stroke="#fff" stroke-opacity=".14" />
+  </g>
+</svg>

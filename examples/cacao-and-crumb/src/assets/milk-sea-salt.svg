@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180" role="img" aria-label="Milk and sea salt chocolate bar">
+  <defs>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#c08a5a" />
+      <stop offset="1" stop-color="#8a5a34" />
+    </linearGradient>
+  </defs>
+  <ellipse cx="120" cy="154" rx="84" ry="13" fill="#2b1a12" opacity=".14" />
+  <g transform="rotate(4 120 90)">
+    <rect x="32" y="32" width="176" height="112" rx="12" fill="url(#bar)" />
+    <g fill="#a9744a">
+      <rect x="42" y="42" width="48" height="44" rx="5" />
+      <rect x="96" y="42" width="48" height="44" rx="5" />
+      <rect x="150" y="42" width="48" height="44" rx="5" />
+      <rect x="42" y="92" width="48" height="42" rx="5" />
+      <rect x="96" y="92" width="48" height="42" rx="5" />
+      <rect x="150" y="92" width="48" height="42" rx="5" />
+    </g>
+    <g fill="#fff" opacity=".75">
+      <circle cx="62" cy="60" r="1.6" />
+      <circle cx="112" cy="72" r="1.4" />
+      <circle cx="146" cy="52" r="1.8" />
+      <circle cx="78" cy="108" r="1.5" />
+      <circle cx="132" cy="114" r="1.7" />
+      <circle cx="176" cy="96" r="1.4" />
+    </g>
+    <rect x="32" y="32" width="176" height="112" rx="12" fill="none" stroke="#fff" stroke-opacity=".18" />
+  </g>
+</svg>

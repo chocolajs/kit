@@ -1,0 +1,131 @@
+<script>
+  import ProductCard from "../lib/product-card.chjs";
+
+  export let title = "Cacao & Crumb — bean-to-bar chocolate";
+  export let description =
+    "Small-batch, single-origin chocolate made in Portland, Oregon. Shop bars, read the journal, and visit the workshop.";
+</script>
+
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Cacao &amp; Crumb" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+  <meta property="og:image" content="https://cacaoandcrumb.example/assets/og.svg" />
+  <meta name="twitter:card" content="summary_large_image" />
+</chocolakit:head>
+
+<template>
+  <main class="page">
+    <section class="hero shell">
+      <div class="hero__copy">
+        <p class="eyebrow">Portland, Oregon</p>
+        <h1>Chocolate, tempered with care.</h1>
+        <p class="lead">
+          We roast, winnow, and stone-grind single-origin cacao in small batches.
+          Every bar is made in the workshop you can see from the street.
+        </p>
+        <div class="button-row">
+          <a class="btn" href="/shop">Shop the bars</a>
+          <a class="btn btn--ghost" href="/journal/bean-to-bar">How we make it</a>
+        </div>
+        <ul class="hero__facts">
+          <li>Direct-trade cacao</li>
+          <li>48-hour conche</li>
+          <li>Plastic-free packaging</li>
+        </ul>
+      </div>
+      <div class="hero__art">
+        <img src="/assets/70-dark.svg" alt="Our 70% dark chocolate bar" width="320" height="240" />
+      </div>
+    </section>
+
+    <section class="section shell">
+      <div class="section__head">
+        <div>
+          <p class="eyebrow">The counter</p>
+          <h2>Three bars to start with</h2>
+        </div>
+        <a href="/shop">All chocolate</a>
+      </div>
+      <ul class="product-grid">
+        <li>
+          <ProductCard slug="70-dark" name="70% Dark" price="900" note="Dried cherry, cocoa nib, molasses"
+            tags="dark single origin vegan" art="/assets/70-dark.svg"></ProductCard>
+        </li>
+        <li>
+          <ProductCard slug="milk-sea-salt" name="Milk &amp; Sea Salt" price="1100"
+            note="Caramel, fleur de sel, toasted milk" tags="milk best seller" art="/assets/milk-sea-salt.svg">
+          </ProductCard>
+        </li>
+        <li>
+          <ProductCard slug="hazelnut-praline" name="Hazelnut Praline" price="1200"
+            note="Roasted hazelnut, brown butter, vanilla" tags="praline nut gift" art="/assets/hazelnut-praline.svg">
+          </ProductCard>
+        </li>
+      </ul>
+    </section>
+
+    <section class="section shell">
+      <p class="eyebrow">Why small batch</p>
+      <ul class="value-list">
+        <li>
+          <h3>One origin at a time</h3>
+          <p>We buy whole beans from four farms and roast each lot separately, so the fruit stays in the bar.</p>
+        </li>
+        <li>
+          <h3>Ground for two days</h3>
+          <p>Stone grinders run for 48 hours. It is slow, loud, and the only way we know to get a clean finish.</p>
+        </li>
+        <li>
+          <h3>Packed by hand</h3>
+          <p>Bars are wrapped in compostable paper and stamped with the batch date. No plastic, no inserts.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section class="section shell">
+      <div class="section__head">
+        <div>
+          <p class="eyebrow">From the journal</p>
+          <h2>Notes from the workshop</h2>
+        </div>
+        <a href="/journal">Read the journal</a>
+      </div>
+      <ul class="post-list">
+        <li>
+          <a href="/journal/tempering">
+            <h2>Tempering by hand, and why we still do it</h2>
+            <p>Snap, shine, and the 31°C window that makes or breaks a batch.</p>
+            <time datetime="2026-09-18">September 18, 2026</time>
+          </a>
+        </li>
+        <li>
+          <a href="/journal/bean-to-bar">
+            <h2>From sack to bar in six days</h2>
+            <p>What actually happens between the warehouse and the wrapper.</p>
+            <time datetime="2026-08-02">August 2, 2026</time>
+          </a>
+        </li>
+      </ul>
+    </section>
+
+    <section class="section shell">
+      <blockquote class="quote">
+        “The 70% is the bar I keep in my desk drawer. It tastes like cherries and it snaps like a dry twig.”
+        <footer>— Renata M., customer since 2021</footer>
+      </blockquote>
+    </section>
+
+    <section class="section shell center">
+      <h2>Visit the workshop</h2>
+      <p class="lead" style="margin-inline: auto;">
+        Tastings every Saturday at 11am and 2pm. 214 SE Ash Street, Portland.
+      </p>
+      <p><a class="btn" href="/contact">Book a tasting</a></p>
+    </section>
+  </main>
+</template>

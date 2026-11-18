@@ -1,0 +1,57 @@
+<script>
+  import Money from "../../lib/money.chjs";
+  import AddToCart from "../../lib/add-to-cart.chjs";
+
+  export let title = "Hazelnut Praline — Cacao & Crumb";
+  export let description =
+    "Piedmont hazelnuts roasted in-house, folded into a brown-butter praline and set in a 60% dark shell.";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/shop/hazelnut-praline" />
+  <meta property="og:type" content="product" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+  <meta property="og:image" content="https://cacaoandcrumb.example/assets/hazelnut-praline.svg" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="breadcrumbs"><a href="/shop">Shop</a> / Hazelnut Praline</p>
+    <article class="product-detail">
+      <div class="product-detail__media">
+        <img src="/assets/hazelnut-praline.svg" alt="Hazelnut praline chocolate bar" width="300" height="225" />
+      </div>
+      <div>
+        <h1>Hazelnut Praline</h1>
+        <p class="lead">
+          Piedmont hazelnuts roasted in-house, folded into a brown-butter praline and
+          set in a 60% dark shell.
+        </p>
+        <p class="product-detail__price"><Money cents="1200"></Money></p>
+        <div class="button-row">
+          <AddToCart slug="hazelnut-praline" label="Add to cart"></AddToCart>
+          <a class="btn btn--ghost" href="/cart">View cart</a>
+        </div>
+        <dl class="spec-list">
+          <dt>Origin</dt><dd>Piedmont, Italy (hazelnuts); Esmeraldas, Ecuador (cacao)</dd>
+          <dt>Tasting notes</dt><dd>Roasted hazelnut, brown butter, vanilla</dd>
+          <dt>Ingredients</dt><dd>Cacao beans, cane sugar, cocoa butter, hazelnuts, butter, vanilla.</dd>
+          <dt>Weight</dt><dd>60 g (2.1 oz)</dd>
+          <dt>Dietary</dt><dd>Contains hazelnut and milk; gluten-free</dd>
+        </dl>
+        <p class="muted">
+          Ships within two business days. Free shipping on orders over $35.
+        </p>
+      </div>
+    </article>
+
+    <section class="section">
+      <h2>Pairs well with</h2>
+      <ul class="button-row" style="list-style: none; padding: 0;">
+        <li><a href="/shop/milk-sea-salt">Milk &amp; Sea Salt</a></li>
+        <li><a href="/shop/70-dark">70% Dark</a></li>
+      </ul>
+    </section>
+  </main>
+</template>

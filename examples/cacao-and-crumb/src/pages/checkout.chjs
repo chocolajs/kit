@@ -1,0 +1,79 @@
+<script>
+  import OrderSummary from "../lib/order-summary.chjs";
+
+  export let title = "Checkout — Cacao & Crumb";
+  export let placed = "";
+  export let error = "";
+  export let name = "";
+  export let email = "";
+  export let lastOrder = "";
+  export let lastTotal = "";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="robots" content="noindex" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/checkout" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="eyebrow">Step 2 of 2</p>
+    <h1>Checkout</h1>
+
+    <p class="banner" if="{placed === '1'}">
+      Order {lastOrder} received ({lastTotal}). We will email a confirmation and ship on
+      the next shipping day.
+    </p>
+    <p class="banner banner--error" if="{error === 'empty'}">
+      Your cart is empty — add a bar before checking out.
+    </p>
+    <p class="banner banner--error" if="{error === 'validation'}">
+      Please add a name, a valid email, and a street address.
+    </p>
+    <p class="banner banner--error" if="{error === 'payload'}">
+      That order was too large to submit. Remove a few bars and try again.
+    </p>
+
+    <div class="cart-layout">
+      <form class="form-card" action="/checkout" method="post">
+        <h2>Shipping details</h2>
+        <div class="field">
+          <label for="name">Full name</label>
+          <input id="name" name="name" type="text" autocomplete="name" required value="{name}" />
+        </div>
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required value="{email}" />
+          <p class="field__hint">For the receipt and shipping updates only.</p>
+        </div>
+        <div class="field">
+          <label for="address">Street address</label>
+          <input id="address" name="address" type="text" autocomplete="street-address" required />
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="city">City</label>
+            <input id="city" name="city" type="text" autocomplete="address-level2" required />
+          </div>
+          <div class="field">
+            <label for="postal">ZIP / postal code</label>
+            <input id="postal" name="postal" type="text" autocomplete="postal-code" required />
+          </div>
+        </div>
+        <div class="field">
+          <label for="notes">Delivery notes <span class="muted">(optional)</span></label>
+          <textarea id="notes" name="notes" rows="3"></textarea>
+        </div>
+        <div class="button-row">
+          <button class="btn" type="submit">Place order</button>
+          <a class="btn btn--ghost" href="/cart">Back to cart</a>
+        </div>
+        <p class="field__hint">
+          This sample shop does not process payments. Submitting saves the order in a
+          cookie and shows a confirmation.
+        </p>
+      </form>
+
+      <OrderSummary></OrderSummary>
+    </div>
+  </main>
+</template>

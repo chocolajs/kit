@@ -1,0 +1,79 @@
+<script>
+  export let title = "Tempering by hand, and why we still do it — Cacao & Crumb";
+  export let description =
+    "Snap, shine, and the 31°C window that makes or breaks a batch. A working note on hand tempering.";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="description" content="{description}" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/journal/tempering" />
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="{title}" />
+  <meta property="og:description" content="{description}" />
+  <meta property="article:published_time" content="2026-09-18" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="breadcrumbs"><a href="/journal">Journal</a> / Tempering</p>
+    <article class="prose">
+      <header>
+        <p class="eyebrow">Workshop note</p>
+        <h1>Tempering by hand, and why we still do it</h1>
+        <p class="muted">
+          <time datetime="2026-09-18">September 18, 2026</time> · 5 min read
+        </p>
+      </header>
+
+      <p>
+        Tempering is the difference between chocolate that snaps and chocolate that
+        bends like a fruit leather. It is also the step most likely to go wrong at
+        7am, before the first coffee.
+      </p>
+
+      <p>
+        Cocoa butter can crystallize in six forms. Only form V gives you the gloss and
+        the clean break we want. The trick is to melt everything, cool it to form IV,
+        then warm it just enough to convert to V without going back.
+      </p>
+
+      <h2>The window</h2>
+      <p>
+        Dark chocolate wants to be worked at 31°C. Milk and white are more forgiving at
+        29°C. A degree too warm and the bar blooms in the wrapper a week later; a
+        degree too cool and it sets streaky.
+      </p>
+
+      <ul>
+        <li>Melt to 45°C to erase all memory of previous crystals.</li>
+        <li>Seed with tempered chocolate and stir down to 27°C.</li>
+        <li>Bring back up to 31°C and hold it there.</li>
+      </ul>
+
+      <blockquote>
+        “If the thermometer is off by two degrees, the batch is off by two degrees.
+        Calibrate the thermometer, not your patience.”
+      </blockquote>
+
+      <h2>Why not a machine?</h2>
+      <p>
+        We have a tempering machine. It lives under the counter, and it is wonderful
+        for production runs of the house bar. The hand method is how we test new
+        origins: two kilos at a time, on a marble slab, with a spatula and a laser
+        thermometer.
+      </p>
+
+      <p>
+        Hand tempering also forces you to look at the chocolate. You notice when the
+        cocoa butter is separating, when the room is too humid, when the beans were
+        roasted unevenly. A machine hides all of that behind a dial.
+      </p>
+
+      <h2>What to look for at home</h2>
+      <p>
+        If you are tempering on a countertop, work in a cool room, keep your tools dry,
+        and test a smear on parchment. It should set in two or three minutes and pull
+        away cleanly. If it stays tacky, the chocolate is too warm.
+      </p>
+    </article>
+  </main>
+</template>

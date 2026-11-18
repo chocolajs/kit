@@ -1,0 +1,47 @@
+<script>
+  import { addToCart } from "./cart.js";
+
+  export let slug = "";
+  export let label = "Add";
+
+  function $runtime(self, ctx) {
+    // `self` is the component root. For a single-button template the root *is*
+    // the button, so calling querySelector("button") here would return null.
+    const button = self.tagName === "BUTTON" ? self : self.querySelector("button");
+    if (!button || !slug) return;
+
+    button.addEventListener("click", () => {
+      addToCart(slug);
+      button.dataset.added = "true";
+      button.textContent = "Added";
+      window.setTimeout(() => {
+        delete button.dataset.added;
+        button.textContent = label;
+      }, 1200);
+    });
+  }
+</script>
+<template>
+  <button class="btn" type="button" aria-live="polite">{label}</button>
+</template>
+<style>
+  .btn {
+    background: #8f3f22;
+    color: #fff8f1;
+    border: 0;
+    border-radius: 999px;
+    padding: 0.45rem 0.95rem;
+    font: inherit;
+    font-size: 0.86rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .btn:hover {
+    background: #7a341b;
+  }
+
+  .btn[data-added="true"] {
+    background: #2f5d3a;
+  }
+</style>

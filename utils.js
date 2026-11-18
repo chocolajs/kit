@@ -2,8 +2,9 @@ import { promises as fs } from "fs";
 import path from "path";
 
 // Chocola imports
-import chalk from "chocola/compiler/chalk.js";
 import { throwError } from "chocola/compiler/utils.js";
+
+import chalk from "./chalk.js";
 
 const warnedMissing = new Set();
 const warnedBlockBundle = new Set();
@@ -38,29 +39,33 @@ export function flushConfigWarnings(rootDir) {
   }
 }
 
+export function warnMissingConfigSections(rootDir, config, { silent } = {}) {
+    if (silent) return;
+
+    const hasBundle = (config.bundle !== undefined && config.bundle !== null) || (config.build !== undefined && config.build !== null);
+    const hasDev = config.dev !== undefined && config.dev !== null;
+    const hasServer = config.server !== undefined && config.server !== null;
+
+    if (!hasBundle && !warnedBlockBundle.has(rootDir)) {
+        warnedBlockBundle.add(rootDir);
+        queueConfigWarning(rootDir, chalk.bold.yellow("WARNING!"), "bundle config not defined in chocola.config.json file: using default bundle configuration.");
+    }
+    if (!hasDev && !warnedBlockDev.has(rootDir)) {
+        warnedBlockDev.add(rootDir);
+        queueConfigWarning(rootDir, chalk.bold.yellow("WARNING!"), "dev config not defined in chocola.config.json file: using default dev configuration.");
+    }
+    if (!hasServer && !warnedBlockServer.has(rootDir)) {
+        warnedBlockServer.add(rootDir);
+        queueConfigWarning(rootDir, chalk.bold.yellow("WARNING!"), "server config not defined in chocola.config.json file: using default server configuration.");
+    }
+}
+
 export async function getConfig(__rootdir, { silent } = {}) {
     try {
         const raw = await fs.readFile(path.join(__rootdir, "chocola.config.json"), "utf-8");
         const config = JSON.parse(raw);
 
-        const hasBundle = (config.bundle !== undefined && config.bundle !== null) || (config.build !== undefined && config.build !== null);
-        const hasDev = config.dev !== undefined && config.dev !== null;
-        const hasServer = config.server !== undefined && config.server !== null;
-
-        if (!silent) {
-          if (!hasBundle && !warnedBlockBundle.has(__rootdir)) {
-              warnedBlockBundle.add(__rootdir);
-              queueConfigWarning(__rootdir, chalk.bold.yellow("WARNING!"), "bundle config not defined in chocola.config.json file: using default bundle configuration.");
-          }
-          if (!hasDev && !warnedBlockDev.has(__rootdir)) {
-              warnedBlockDev.add(__rootdir);
-              queueConfigWarning(__rootdir, chalk.bold.yellow("WARNING!"), "dev config not defined in chocola.config.json file: using default dev configuration.");
-          }
-          if (!hasServer && !warnedBlockServer.has(__rootdir)) {
-              warnedBlockServer.add(__rootdir);
-              queueConfigWarning(__rootdir, chalk.bold.yellow("WARNING!"), "server config not defined in chocola.config.json file: using default server configuration.");
-          }
-        }
+        warnMissingConfigSections(__rootdir, config, { silent });
 
         return config;
     } catch(err) {

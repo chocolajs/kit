@@ -3,12 +3,12 @@ import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createRequire } from "module";
 import { readFile } from "fs/promises";
+import { realpathSync } from "fs";
 
-import { getConfig, isMissingConfigFile } from "../utils.js";
+import { loadConfig } from "../config.js";
+import { isMissingConfigFile } from "../utils.js";
 
-// Chocola imports
-import { loadConfig } from "chocola/compiler/config.js";
-import chalk from "chocola/compiler/chalk.js";
+import chalk from "../chalk.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,27 +19,35 @@ const c = isPlain ? {
 
 export default __dirname;
 
-export async function resolveConfig(rootDir, cliOverrides, configPathOpt) {
+export async function resolveConfig(rootDir, cliOverrides = {}, configPathOpt) {
   const customPath = configPathOpt ? path.resolve(rootDir, configPathOpt) : null;
-  const fullConfig = customPath
-    ? await readFile(customPath, "utf-8").then(r => JSON.parse(r))
-    : await getConfig(rootDir, { silent: true });
-  const isMissing = customPath ? false : isMissingConfigFile(fullConfig);
-  const base = await loadConfig(rootDir, { silent: true, customPath });
-  if (cliOverrides.outDir) base.outDir = path.resolve(rootDir, cliOverrides.outDir);
-  if (cliOverrides.srcDir) base.srcDir = path.resolve(rootDir, cliOverrides.srcDir);
-  if (cliOverrides.libDir) base.libDir = path.resolve(rootDir, cliOverrides.libDir);
-  if (cliOverrides.emptyOutDir != null) base.emptyOutDir = cliOverrides.emptyOutDir;
-  const effectiveDev = { hostname: "localhost", port: 3000, ...(!isMissing && fullConfig.dev || {}), ...cliOverrides.dev };
-  const effectiveServer = { hostname: "localhost", port: 8080, middleware: null, ...(!isMissing && fullConfig.server || {}), ...cliOverrides.server };
+  const { config, paths, raw } = await loadConfig(rootDir, {
+    silent: true,
+    customPath,
+    overrides: cliOverrides,
+  });
+  const isMissing = customPath ? false : isMissingConfigFile(raw);
+  const effectiveDev = { ...config.dev };
+  const effectiveServer = { ...config.server };
+  const rawServer = raw && typeof raw.server === "object" && raw.server !== null ? raw.server : {};
+
   if (!cliOverrides.server?.port && process.env.PORT) {
     const envPort = parseInt(process.env.PORT, 10);
     if (Number.isFinite(envPort)) effectiveServer.port = envPort;
   }
-  if (!cliOverrides.server?.hostname && !fullConfig.server?.hostname && !fullConfig.server?.host && process.env.PORT) {
+  if (!cliOverrides.server?.hostname && !rawServer.hostname && !rawServer.host && process.env.PORT) {
     effectiveServer.hostname = "0.0.0.0";
   }
-  return { fullConfig, base, effectiveDev, effectiveServer, isMissing };
+
+  return {
+    fullConfig: raw,
+    base: config,
+    config,
+    paths,
+    effectiveDev,
+    effectiveServer,
+    isMissing,
+  };
 }
 
 function parsePort(val) {
@@ -128,7 +136,10 @@ export async function main() {
     console.log("build options:");
     console.log("  --srcDir <dir>        Source directory (default: src)");
     console.log("  --outDir <dir>        Output directory (default: dist)");
-    console.log("  --libDir <dir>        Components subdir (default: lib)");
+    console.log("  --pagesDir <dir>      Pages directory, relative to srcDir (default: pages)");
+    console.log("  --appFile <file>      Document shell, relative to srcDir (default: app.html)");
+    console.log("  --staticDir <dir>     Static directory, relative to srcDir (default: static)");
+    console.log("  --libDir <dir>        Deprecated and ignored; use explicit .chjs imports");
     console.log("  --no-emptyOutDir      Do not clean outDir before build");
     console.log("");
     console.log("dev options:");
@@ -162,14 +173,19 @@ export async function main() {
     const rawPort = flags.port ? parsePort(flags.port) : undefined;
     const effectiveHost = flags.host || flags.hostname;
 
-    const { base, effectiveDev, effectiveServer } = await resolveConfig(rootDir, {
+    const cliOverrides = {
       outDir: flags.outDir,
       srcDir: flags.srcDir,
+      pagesDir: flags.pagesDir,
+      appFile: flags.appFile,
+      staticDir: flags.staticDir,
       libDir: flags.libDir,
-      emptyOutDir: flags.emptyOutDir === false ? false : (flags.noEmptyOutDir === true ? false : undefined),
+      emptyOutDir: flags.emptyOutDir === false || flags.noEmptyOutDir === true ? false : undefined,
       dev: { port: rawPort, hostname: effectiveHost },
       server: { port: rawPort, hostname: effectiveHost },
-    }, configPath);
+    };
+
+    const { base, paths, effectiveDev, effectiveServer } = await resolveConfig(rootDir, cliOverrides, configPath);
 
     let serverInstance = null;
     let devServer = null;
@@ -183,8 +199,8 @@ export async function main() {
 
     switch (cmd) {
       case "build": {
-        const routingMod = await import("../routing.js");
-        await routingMod.default(rootDir, { overrides: base });
+        const { default: compileMultipage } = await import("../routing.js");
+        await compileMultipage(rootDir, { config: base, paths });
         process.exit(0);
       }
       case "dev": {
@@ -198,6 +214,8 @@ export async function main() {
           hostname: effectiveHost || effectiveDev.hostname,
           open: flags.open || false,
           silent: true,
+          config: base,
+          paths,
         });
         devServer = serverInstance;
         break;
@@ -213,6 +231,8 @@ export async function main() {
           hostname: effectiveHost || effectiveServer.hostname,
           middleware: flags.middleware || null,
           silent: true,
+          config: base,
+          paths,
         });
       }
     }
@@ -226,7 +246,17 @@ export async function main() {
   }
 }
 
-if (process.argv[1] === __filename) {
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  const invoked = path.resolve(process.argv[1]);
+  try {
+    return realpathSync(invoked) === realpathSync(__filename);
+  } catch {
+    return invoked === __filename;
+  }
+}
+
+if (isEntryPoint()) {
   main().catch(err => {
     console.error(err.message || err);
     process.exit(1);

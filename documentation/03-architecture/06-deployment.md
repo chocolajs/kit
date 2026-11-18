@@ -9,62 +9,96 @@ description: Technical deployment architecture
 
 ```mermaid
 flowchart TD
-    A[Framework init] --> B[Scan src/lib/]
-    B --> C[Chocola compilation]
-    C --> D[Component → CSS/JS modules]
-    E[Scan src/pages/] --> F[Route graph]
-    F --> G[renderPage execution]
-    G --> H[Static HTML files]
-    D & H --> I[Write outDir]
-    I --> J[Write hashes.json]
+    A[Load config and resolve paths] --> B[Discover src/pages/**/*.chjs]
+    B --> C[Mirror graph under .chocola/graph]
+    C --> D[buildModuleGraph per page]
+    D --> E[Load and validate app.html shell]
+    E --> F[render graph with ctx]
+    F --> G[Scoped CSS sc-hash.css]
+    F --> H[Runtime ESM run-hash.js]
+    F --> I[Assemble route HTML]
+    I --> J[Write outDir]
+    G --> J
+    H --> J
+    K[Author assets and src/static] --> J
+    J --> L[Write .chocola/hashes.json]
 ```
+
+### Pipeline stages
+
+1. **Configuration** — Load `chocola.config.json`, apply CLI overrides, and resolve all paths.
+2. **Page discovery** — Enumerate `.chjs` files under `pagesDir`. `pages/index.chjs` is required for `/`. A `.html` page throws a migration error.
+3. **Graph mirror** — Mirror source files under `.chocola/graph/` and strip page-only directives such as `<chocolakit:head>` before the core compiler reads them.
+4. **Module graph construction** — Call `buildModuleGraph` per page. Imports determine the graph; there is no component scan.
+5. **Shell validation** — Load `app.html`, require exactly one `<chocolakit:body>`, and allow at most one `<chocolakit:head>` inside `<head>`.
+6. **Rendering** — Call `render(graph, ctx)` per route to produce the body fragment, scoped styles, runtime chunks, and module-id hash map.
+7. **Emission** — Write route HTML, scoped CSS, runtime chunks, copied assets, and the hash map.
+
+`emptyOutDir` controls whether `outDir` is cleaned before emission. Dev mode never writes `outDir`.
 
 ### Output artifacts
 
-- `outDir/` — Contains all generated files:
-  - HTML files for each resolved route
-  - `sc-<hash>.css` and `css-<hash>.css` — Scoped and global CSS modules
-  - `js-<hash>.js` and `run-<hash>.js` — Compiled JavaScript modules
-  - `hashes.json` — Mapping of component filenames to deterministic hashes
-- `.chocola/` — Excluded from build output; contains `hashes.json` for debugging
+- `outDir/` — The deployable static tree:
+  - Route HTML such as `index.html`, `about.html`, and `blog/index.html`
+  - `sc-<hash>.css` — Content-hashed scoped component stylesheets
+  - `run-<hash>.js` — Content-hashed ESM runtime chunks
+  - Copied author assets — `src/static/` plus other non-`.chjs` source files, with their original paths
+- `.chocola/hashes.json` — Module id → 8-letter scoped CSS id, for example:
+
+  ```json
+  {
+    "lib/card.chjs": "fkffxyip",
+    "pages/index.chjs": "zfamaczj"
+  }
+  ```
+
+Global CSS is not emitted as `css-<hash>.css`. It stays an author-managed file linked from `app.html`, for example `<link rel="stylesheet" href="/styles.css">`. Kit copies it unchanged and only emits the generated scoped stylesheet.
 
 ### Deployment model
 
-- Output is a static file tree suitable for any static file host (CDN, object storage, etc.)
-- No runtime dependency on ChocolaKit process after build
-- Deterministic hashes enable aggressive caching and cache-busting strategies
-- `emptyOutDir` control over idempotent rebuilds
+- The output is a static file tree suitable for any static host, CDN, or object storage.
+- There is no runtime dependency on a ChocolaKit process after a static build.
+- Content-hashed CSS and runtime filenames enable aggressive caching and cache busting.
+- `.chocola/` is a local build cache/reference directory and is not part of the deployable output. Add it to `.gitignore`.
 
-### SSR production server deployment
+### Minimal build example
+
+```sh
+chjs build
+# deploy the contents of dist/
+```
+
+## SSR production server deployment
 
 ### Process model
 
-- Single long-running Node.js process listening on configured port
-- Component graph retained in memory for request serving
-- No build step required between deployment and serving
+- A single long-running Node.js process listens on the configured port.
+- At startup, `createHandler` calls `buildSiteState` and warms every route with an empty context. No separate build step is required between deployment and serving.
+- The page module graphs, scoped CSS, runtime chunks, and hash map are retained in memory for request serving.
+- `renderRoute` calls Chocola's `render(graph, ctx)` per request; only `ctx` varies.
+- `server.middleware` is imported once at process start. A missing configured middleware file fails startup.
 
 ### Configuration-driven runtime
 
-- `server.port` and `server.hostname` from config file or CLI overrides
-- `server.middleware` ESM module loaded once at process start
-- `PORT` environment variable honored at runtime for port overriding
+- `--port` wins over `PORT`, which wins over `server.port`, which wins over `8080`.
+- When `PORT` is set and no explicit host is configured, the process binds to `0.0.0.0`.
+- `server.hostname` (or `server.host`) and `server.middleware` come from `chocola.config.json` or CLI flags.
 
 ### Container deployment pattern
 
 ```dockerfile
-# Dockerfile example
 FROM node:20-alpine
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm install --production
+RUN npm install --omit=dev
 COPY . .
 EXPOSE 8080
-CMD ["chocola", "serve"]
+CMD ["chjs", "serve"]
 ```
 
-- Process binds to `0.0.0.0` when `PORT` env is set and no explicit hostname configured
-- Orchestrator (K8s, Docker Swarm, etc.) assigns `PORT` at runtime
-- Health checks can target the listening port
+- The process binds to `0.0.0.0` when `PORT` is set and no explicit hostname is configured.
+- Orchestrators (Kubernetes, Docker Swarm, and similar) can assign `PORT` at runtime.
+- Health checks should target the listening port, ideally with a route that exists in `src/pages/`.
 
 ### Reverse proxy integration
 
@@ -80,17 +114,17 @@ location / {
 }
 ```
 
-- SSR server handles `304` not-modified and `gzip` internally
-- Reverse proxy can offload TLS termination
-- Asset caching headers from SSR can be complemented by proxy caching
+- The SSR server handles `304` not-modified responses and `gzip` internally.
+- A reverse proxy can terminate TLS.
+- Asset caching headers from the SSR server can be complemented by proxy caching.
 
 ### SSG vs SSR deployment comparison
 
 | Aspect | Static SSG | SSR production server |
 |---|---|---|
-| Runtime after deploy | None (pure static files) | Node.js process required |
-| Process model | File-serving only | Per-request rendering + asset serving |
-| Port configuration | Static in built files | Configurable at startup via `PORT` env |
+| Runtime after deploy | None (static files only) | Node.js process required |
+| Process model | File serving only | Per-request rendering + asset serving |
+| Port configuration | Not applicable | `--port` > `PORT` > `server.port` > `8080` |
 | Dynamic data | Build-time only | Per-request query params + middleware |
-| Scaling | CDN-friendly, horizontal via load balancer | Single process; scale via multiple instances behind load balancer |
-| Roll strategy | Replace static file tree | Redeploy new process; drain old before terminating new |
+| Scaling | CDN-friendly, horizontal via load balancer | Multiple instances behind a load balancer |
+| Roll strategy | Replace the static file tree | Deploy new process, then drain the old one |

@@ -1,0 +1,17 @@
+<script>
+  import CartView from "../lib/cart-view.chjs";
+
+  export let title = "Cart — Cacao & Crumb";
+</script>
+<chocolakit:head>
+  <title>{title}</title>
+  <meta name="robots" content="noindex" />
+  <link rel="canonical" href="https://cacaoandcrumb.example/cart" />
+</chocolakit:head>
+<template>
+  <main class="page shell">
+    <p class="eyebrow">Your order</p>
+    <h1>Cart</h1>
+    <CartView></CartView>
+  </main>
+</template>
