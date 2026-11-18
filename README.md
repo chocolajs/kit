@@ -1,8 +1,10 @@
-# Fast and easy apps with Chocola
+# Chocola, out of the wrapper
 
 ChocolaKit is the official lightweight framework to create web apps using [Chocola](https://chocolajs.dev).
 
 This package features a fully functional modern framework with SSG, SSR/CSR, dev server, CLI, and more useful tools, with minimal dependencies and no third-party tooling (e.g. Vite, Rollup, etc.), providing an ultrafast and easy way to build your Chocola web apps.
+
+ChocolaKit apps use `.chjs` single-file components with explicit imports, a required `src/app.html` document shell, and file-based routing from `src/pages/`.
 
 ## Documentation
 
